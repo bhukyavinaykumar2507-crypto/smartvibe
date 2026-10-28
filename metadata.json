@@ -1,0 +1,6 @@
+{
+  "name": "SmartVibe — AI-Based Machine Health Monitoring System",
+  "description": "Real-time industrial IoT machine health monitoring dashboard with ADXL345 vibration, DS18B20 temperature, MAX9814 noise telemetry, anomaly detection, and automated reporting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
