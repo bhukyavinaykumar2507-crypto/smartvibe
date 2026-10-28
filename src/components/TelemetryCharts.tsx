@@ -113,11 +113,11 @@ export const TelemetryCharts: React.FC<TelemetryChartsProps> = ({
       {(activeTab === 'all' || activeTab === 'vibration') && (
         <InteractiveChart
           title="Vibration Trend — ADXL345 Accelerometer"
-          subtitle="Resultant dynamic acceleration (m/s²) and ISO 10816 RMS velocity (mm/s)"
+          subtitle="Resultant dynamic acceleration (m/s²) and RMS acceleration (m/s²)"
           timestamps={timestamps}
           series={[
             { name: 'Resultant (m/s²)', color: '#38bdf8', unit: 'm/s²', values: vibResultant },
-            { name: 'RMS (mm/s)', color: '#818cf8', unit: 'mm/s', values: vibRms },
+            { name: 'RMS (m/s²)', color: '#818cf8', unit: 'm/s²', values: vibRms },
           ]}
           thresholdWarning={settings.vibrationWarningThreshold}
           thresholdCritical={settings.vibrationCriticalThreshold}

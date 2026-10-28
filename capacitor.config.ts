@@ -1,0 +1,22 @@
+import type { CapacitorConfig } from '@capacitor/cli';
+
+const config: CapacitorConfig = {
+  appId: 'com.smartvibe.monitor',
+  appName: 'SmartVibe',
+  webDir: 'dist',
+  server: {
+    androidScheme: 'https',
+    cleartext: true,
+  },
+  plugins: {
+    StatusBar: {
+      style: 'DARK',
+      backgroundColor: '#070b14',
+    },
+    Keyboard: {
+      resize: 'body',
+    },
+  },
+};
+
+export default config;

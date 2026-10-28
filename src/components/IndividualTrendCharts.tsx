@@ -269,14 +269,14 @@ export const IndividualTrendCharts: React.FC<IndividualTrendChartsProps> = ({
         'Noise Trend',
         <Volume2 className="h-4 w-4" />,
         'text-purple-400',
-        'Signal Level',
+        'Relative Noise (%)',
         noiseValues,
         '#a855f7',
         'grad-noise-purple',
-        [0, 50, 100, 150, 200],
+        [0, 25, 50, 75, 100],
         0,
-        200,
-        'dB*',
+        100,
+        '%',
         'noise'
       )}
     </div>

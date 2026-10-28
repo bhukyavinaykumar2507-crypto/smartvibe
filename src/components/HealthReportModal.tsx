@@ -1,6 +1,7 @@
-import React from 'react';
-import { Printer, Download, X, ShieldCheck, CheckCircle2, AlertTriangle, ShieldAlert, Cpu } from 'lucide-react';
+import React, { useState } from 'react';
+import { Printer, Download, X, ShieldCheck, CheckCircle2, AlertTriangle, ShieldAlert, Cpu, Cloud, ExternalLink } from 'lucide-react';
 import type { TelemetryPoint, MachineSettings, AlertItem } from '../types/telemetry';
+import { uploadReportToDrive, getAccessToken, googleSignIn } from '../services/googleDrive';
 
 interface HealthReportModalProps {
   isOpen: boolean;
@@ -9,6 +10,7 @@ interface HealthReportModalProps {
   history: TelemetryPoint[];
   alerts: AlertItem[];
   settings: MachineSettings;
+  onOpenGoogleDrive?: () => void;
 }
 
 export const HealthReportModal: React.FC<HealthReportModalProps> = ({
@@ -18,15 +20,20 @@ export const HealthReportModal: React.FC<HealthReportModalProps> = ({
   history,
   alerts,
   settings,
+  onOpenGoogleDrive,
 }) => {
   if (!isOpen) return null;
+
+  const [isSavingToDrive, setIsSavingToDrive] = useState(false);
+  const [driveUploadResult, setDriveUploadResult] = useState<{ name: string; url?: string } | null>(null);
+  const [driveError, setDriveError] = useState<string | null>(null);
 
   const handlePrint = () => {
     window.print();
   };
 
-  const handleDownloadJSON = () => {
-    const reportData = {
+  const generateReportJSON = () => {
+    return {
       project: 'SmartVibe — AI-Based Machine Health Monitoring System',
       generatedAt: new Date().toISOString(),
       machine: settings,
@@ -39,7 +46,10 @@ export const HealthReportModal: React.FC<HealthReportModalProps> = ({
         noiseRelativeMean: history.length ? (history.reduce((a, b) => a + b.noise.relativeLevel, 0) / history.length).toFixed(1) : 'Data unavailable',
       }
     };
+  };
 
+  const handleDownloadJSON = () => {
+    const reportData = generateReportJSON();
     const blob = new Blob([JSON.stringify(reportData, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -49,8 +59,36 @@ export const HealthReportModal: React.FC<HealthReportModalProps> = ({
     URL.revokeObjectURL(url);
   };
 
+  const handleSaveToDrive = async () => {
+    setIsSavingToDrive(true);
+    setDriveError(null);
+    setDriveUploadResult(null);
+
+    try {
+      let token = await getAccessToken();
+      if (!token) {
+        const authResult = await googleSignIn();
+        if (!authResult) throw new Error('Google Sign-In was cancelled');
+        token = authResult.accessToken;
+      }
+
+      const reportData = generateReportJSON();
+      const filename = `SmartVibe_Health_Audit_${settings.machineId}_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+      const uploaded = await uploadReportToDrive(filename, JSON.stringify(reportData, null, 2), 'application/json');
+
+      setDriveUploadResult({
+        name: uploaded.name,
+        url: uploaded.webViewLink
+      });
+    } catch (err: any) {
+      setDriveError(err.message || 'Failed to save to Google Drive');
+    } finally {
+      setIsSavingToDrive(false);
+    }
+  };
+
   // Safe metrics calculation
-  const vibRms = latest ? `${latest.vibration.rms} mm/s` : 'Data unavailable';
+  const vibRms = latest ? `${latest.vibration.rms} m/s²` : 'Data unavailable';
   const vibResultant = latest ? `${latest.vibration.resultant} m/s²` : 'Data unavailable';
   const vibPeak = latest ? `${latest.vibration.peak} m/s²` : 'Data unavailable';
   const tempCurrent = latest ? `${latest.temperature.current} °C` : 'Data unavailable';
@@ -66,15 +104,24 @@ export const HealthReportModal: React.FC<HealthReportModalProps> = ({
       <div className="relative my-8 w-full max-w-4xl rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl print:m-0 print:w-full print:border-none print:shadow-none print:bg-white print:text-black">
         
         {/* Modal Top Actions (Hidden in print) */}
-        <div className="no-print flex items-center justify-between border-b border-slate-800 p-4 bg-slate-950/80 rounded-t-2xl">
+        <div className="no-print flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 p-4 bg-slate-950/80 rounded-t-2xl">
           <div className="flex items-center gap-2">
             <Cpu className="h-5 w-5 text-cyan-400" />
             <span className="text-sm font-semibold text-white">Machine Health Audit Report</span>
-            <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] font-mono text-slate-300">
-              ISO 10816 Audit Format
+            <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] font-mono text-cyan-300">
+              Audit & Inspection Format
             </span>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={handleSaveToDrive}
+              disabled={isSavingToDrive}
+              className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 transition-colors cursor-pointer disabled:opacity-50"
+              title="Backup audit report directly to Google Drive"
+            >
+              <Cloud className="h-3.5 w-3.5" />
+              <span>{isSavingToDrive ? 'Saving...' : 'Save to Drive'}</span>
+            </button>
             <button
               onClick={handlePrint}
               className="flex items-center gap-1.5 rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-500 transition-colors cursor-pointer"
@@ -97,6 +144,34 @@ export const HealthReportModal: React.FC<HealthReportModalProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Drive notification status */}
+        {driveUploadResult && (
+          <div className="no-print mx-4 mt-3 flex items-center justify-between rounded-xl border border-blue-500/40 bg-blue-950/30 p-3 text-xs text-blue-300">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+              <span>Saved <strong>{driveUploadResult.name}</strong> to Google Drive!</span>
+            </div>
+            {driveUploadResult.url && (
+              <a
+                href={driveUploadResult.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 rounded bg-blue-800/60 px-2 py-1 font-semibold text-white hover:bg-blue-700 transition-colors"
+              >
+                <span>View in Drive</span>
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            )}
+          </div>
+        )}
+
+        {driveError && (
+          <div className="no-print mx-4 mt-3 flex items-center gap-2 rounded-xl border border-rose-500/40 bg-rose-950/30 p-3 text-xs text-rose-300">
+            <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0" />
+            <span>{driveError}</span>
+          </div>
+        )}
 
         {/* PRINTABLE REPORT BODY */}
         <div className="p-8 space-y-6 text-slate-200 print:text-slate-900 print:p-4">
@@ -135,7 +210,7 @@ export const HealthReportModal: React.FC<HealthReportModalProps> = ({
               </div>
               <div>
                 <span className="text-[10px] text-slate-400 print:text-slate-500 block uppercase font-mono">Standard Ref.</span>
-                <span className="font-mono text-slate-300 print:text-slate-700">ISO 10816 Class II</span>
+                <span className="font-mono text-slate-300 print:text-slate-700">Configured Baseline Limits</span>
               </div>
             </div>
           </div>
@@ -150,7 +225,7 @@ export const HealthReportModal: React.FC<HealthReportModalProps> = ({
                 <strong>Current Status:</strong> <span className="font-semibold uppercase">{overallCondition}</span> (Health Score: {healthScore})
               </p>
               <p>
-                {latest?.health.reasons[0] || 'Machine is running within established baseline tolerances. Vibration velocity and thermal dissipation align with Class II industrial rotating equipment specifications.'}
+                {latest?.health.reasons[0] || 'Machine is running within established baseline tolerances. Vibration acceleration and thermal dissipation align with configured equipment baseline specifications.'}
               </p>
               <div className="pt-1 text-[11px] text-slate-400 print:text-slate-600 italic">
                 {latest?.health.disclaimer || 'Advisory Notice: Sensor readings indicate operational condition. Certified physical inspection is recommended prior to disassembly.'}
@@ -180,13 +255,13 @@ export const HealthReportModal: React.FC<HealthReportModalProps> = ({
                       ADXL345 Accelerometer (I2C)
                     </td>
                     <td className="p-2 border border-slate-800 print:border-slate-300 font-sans">
-                      RMS Vibration Velocity
+                      RMS Acceleration
                     </td>
                     <td className="p-2 border border-slate-800 print:border-slate-300 text-right font-bold text-indigo-300 print:text-indigo-800">
                       {vibRms}
                     </td>
                     <td className="p-2 border border-slate-800 print:border-slate-300 text-right text-slate-400 print:text-slate-600">
-                      {settings.vibrationWarningThreshold} mm/s
+                      {settings.vibrationWarningThreshold} m/s²
                     </td>
                     <td className="p-2 border border-slate-800 print:border-slate-300 text-center font-sans font-semibold uppercase">
                       {latest?.vibration.status || 'Data unavailable'}

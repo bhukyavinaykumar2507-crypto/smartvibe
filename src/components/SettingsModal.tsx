@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, Save, RefreshCw, Check, CheckCircle2, ShieldAlert, Cpu, AlertTriangle, Radio } from 'lucide-react';
+import { Settings, Save, RefreshCw, Check, CheckCircle2, ShieldAlert, Cpu, AlertTriangle, Radio, Globe, Wifi } from 'lucide-react';
 import type { MachineSettings } from '../types/telemetry';
+import { getCustomApiUrl, setCustomApiUrl, testBackendConnection } from '../services/api';
 
 interface SettingsModalProps {
   settings: MachineSettings;
@@ -20,6 +21,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [formData, setFormData] = useState<MachineSettings>(settings);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [customUrl, setCustomUrl] = useState(getCustomApiUrl());
+  const [testResult, setTestResult] = useState<{ success?: boolean; message?: string; testing?: boolean } | null>(null);
 
   useEffect(() => {
     setFormData(settings);
@@ -38,10 +41,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   const scenarios = [
-    { id: 'normal', name: 'Nominal Normal Operation', desc: 'Baseline vibration (1.2 mm/s), stable temp (38°C), nominal acoustics (32%)' },
-    { id: 'bearing_wear', name: 'Bearing Degradation Simulation', desc: 'Elevated RMS vibration (3.8 mm/s), high friction acoustics (72%), thermal creep' },
+    { id: 'normal', name: 'Nominal Normal Operation', desc: 'Baseline vibration (1.2 m/s²), stable temp (38°C), nominal acoustics (32%)' },
+    { id: 'bearing_wear', name: 'Bearing Degradation Simulation', desc: 'Elevated RMS vibration (3.8 m/s²), high friction acoustics (72%), thermal creep' },
     { id: 'overheating', name: 'Thermal Overload Simulation', desc: 'Temperature climbs above 70°C, triggers thermal warnings' },
-    { id: 'unbalance', name: 'Rotor Dynamic Unbalance', desc: 'Severe 1X harmonic acceleration spikes (5.2 mm/s RMS, ISO Zone D anomaly)' },
+    { id: 'unbalance', name: 'Rotor Dynamic Unbalance', desc: 'Severe 1X harmonic acceleration spikes (5.2 m/s² RMS, Critical Anomaly)' },
     { id: 'acoustic_spike', name: 'Acoustic Interference / Cavitation', desc: 'High relative sound peaks (85%) with normal mechanical vibration' },
   ];
 
@@ -59,7 +62,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               Sensor Settings & Threshold Configuration
             </h2>
             <p className="text-xs text-slate-400">
-              Adjust ISO 10816 vibration parameters, DS18B20 thermal cutoffs, MAX9814 acoustic limits, and operational modes
+              Adjust ADXL345 vibration parameters (m/s²), DS18B20 thermal cutoffs (°C), MAX9814 acoustic limits (%), and operational modes
             </p>
           </div>
         </div>
@@ -269,14 +272,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             </div>
 
-            {/* Vibration Thresholds (ISO 10816) */}
+            {/* Vibration Thresholds (Baseline Rules) */}
             <div className="rounded-lg bg-slate-950/60 p-4 border border-indigo-900/30 space-y-3">
               <span className="text-xs font-bold text-indigo-400 uppercase tracking-wide block">
-                ADXL345 Vibration RMS (mm/s)
+                ADXL345 Vibration RMS (m/s²)
               </span>
               <div>
                 <label className="text-[11px] text-slate-400 block mb-1">
-                  Baseline (Normal) (mm/s)
+                  Baseline (Normal) (m/s²)
                 </label>
                 <input
                   type="number"
@@ -288,7 +291,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
               <div>
                 <label className="text-[11px] text-slate-400 block mb-1">
-                  Warning Threshold (ISO Zone C)
+                  Warning Threshold (m/s²)
                 </label>
                 <input
                   type="number"
@@ -300,7 +303,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
               <div>
                 <label className="text-[11px] text-slate-400 block mb-1">
-                  Critical Threshold (ISO Zone D)
+                  Critical Threshold (m/s²)
                 </label>
                 <input
                   type="number"
@@ -347,6 +350,71 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
 
           </div>
+        </div>
+
+        {/* Android APK & Remote Backend Server Configuration */}
+        <div className="rounded-xl border border-blue-900/40 bg-slate-900/50 p-6 backdrop-blur-md">
+          <div className="flex items-center gap-2 mb-3">
+            <Globe className="h-4 w-4 text-blue-400" />
+            <h3 className="text-sm font-semibold text-slate-100">
+              Android APK & Remote Server Connectivity
+            </h3>
+          </div>
+          <p className="text-xs text-slate-400 mb-4">
+            When installed on an Android device, enter your SmartVibe backend server address (e.g. your PC's Wi-Fi IP or Cloud Run URL). Leave empty to use local simulated telemetry.
+          </p>
+          <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+            <div className="flex-1 w-full">
+              <input
+                type="text"
+                placeholder="e.g. http://192.168.1.100:3000 or https://smartvibe.run.app"
+                value={customUrl}
+                onChange={(e) => {
+                  setCustomUrl(e.target.value);
+                  setTestResult(null);
+                }}
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-mono text-white placeholder-slate-500 focus:border-blue-500 focus:outline-none"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={async () => {
+                if (!customUrl.trim()) {
+                  setTestResult({ success: true, message: 'Using local offline telemetry simulator.' });
+                  return;
+                }
+                setTestResult({ testing: true });
+                const res = await testBackendConnection(customUrl);
+                setTestResult(res);
+              }}
+              disabled={testResult?.testing}
+              className="flex items-center gap-1.5 rounded-lg border border-blue-500/40 bg-blue-950/40 px-3 py-2 text-xs font-semibold text-blue-300 hover:bg-blue-900/40 hover:text-white transition-all cursor-pointer whitespace-nowrap"
+            >
+              <Wifi className={`h-3.5 w-3.5 ${testResult?.testing ? 'animate-pulse' : ''}`} />
+              <span>{testResult?.testing ? 'Testing...' : 'Test Connection'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setCustomApiUrl(customUrl);
+                setTestResult({ success: true, message: 'Saved backend URL!' });
+                setTimeout(() => setTestResult(null), 3000);
+              }}
+              className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-500 transition-colors cursor-pointer whitespace-nowrap"
+            >
+              Save URL
+            </button>
+          </div>
+          {testResult && !testResult.testing && (
+            <div className={`mt-3 rounded-lg p-2.5 text-xs font-mono flex items-center gap-2 border ${
+              testResult.success
+                ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
+                : 'bg-rose-950/40 border-rose-500/40 text-rose-300'
+            }`}>
+              {testResult.success ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : <ShieldAlert className="h-4 w-4 shrink-0" />}
+              <span>{testResult.message}</span>
+            </div>
+          )}
         </div>
 
         {/* Submit Actions */}

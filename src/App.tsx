@@ -16,6 +16,20 @@ import { AiHealthScorePanel } from './components/AiHealthScorePanel';
 import { HealthReportModal } from './components/HealthReportModal';
 import { HardwareGuide } from './components/HardwareGuide';
 import { SettingsModal } from './components/SettingsModal';
+import { GoogleDriveView } from './components/GoogleDriveView';
+import { initAuth, logoutGoogle } from './services/googleDrive';
+import { 
+  fetchLatestTelemetry, 
+  fetchTelemetryHistory, 
+  fetchAlerts as apiFetchAlerts, 
+  acknowledgeAlert as apiAcknowledgeAlert, 
+  clearAcknowledgedAlerts as apiClearAlerts, 
+  updateSettings as apiUpdateSettings, 
+  requestAiDiagnosis as apiRequestAiDiagnosis 
+} from './services/api';
+import { App as CapApp } from '@capacitor/app';
+import { StatusBar, Style } from '@capacitor/status-bar';
+import type { User as FirebaseUser } from 'firebase/auth';
 import type { 
   TelemetryPoint, 
   MachineSettings, 
@@ -55,15 +69,16 @@ export default function App() {
   const [aiReportText, setAiReportText] = useState<string | null>(null);
   const [isSendingPacket, setIsSendingPacket] = useState(false);
 
-  // Fetch latest telemetry
+  // Google Drive Auth state
+  const [googleUser, setGoogleUser] = useState<FirebaseUser | null>(null);
+  const [driveToken, setDriveToken] = useState<string | null>(null);
+
+  // Fetch latest telemetry using centralized api service
   const fetchLatest = useCallback(async () => {
     try {
-      const res = await fetch('/api/telemetry/latest');
-      if (res.ok) {
-        const data = await res.json();
-        setLatestData(data);
-        if (data.settings) setSettings(data.settings);
-      }
+      const data = await fetchLatestTelemetry();
+      setLatestData(data.point);
+      if (data.settings) setSettings(data.settings);
     } catch (err) {
       console.warn('Failed to fetch latest telemetry:', err);
     }
@@ -72,12 +87,9 @@ export default function App() {
   // Fetch history
   const fetchHistory = useCallback(async (range = selectedRange) => {
     try {
-      const res = await fetch(`/api/telemetry/history?range=${range}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.points && Array.isArray(data.points)) {
-          setHistoryData(data.points);
-        }
+      const points = await fetchTelemetryHistory(range);
+      if (Array.isArray(points)) {
+        setHistoryData(points);
       }
     } catch (err) {
       console.warn('Failed to fetch history:', err);
@@ -87,11 +99,8 @@ export default function App() {
   // Fetch alerts
   const fetchAlerts = useCallback(async () => {
     try {
-      const res = await fetch('/api/alerts');
-      if (res.ok) {
-        const data = await res.json();
-        setAlerts(data);
-      }
+      const data = await apiFetchAlerts();
+      setAlerts(data);
     } catch (err) {
       console.warn('Failed to fetch alerts:', err);
     }
@@ -105,7 +114,51 @@ export default function App() {
       setIsLoading(false);
     }
     init();
-  }, [fetchLatest, fetchHistory, fetchAlerts]);
+
+    // Listen to Google Drive Auth state
+    const unsubscribe = initAuth(
+      (user, token) => {
+        setGoogleUser(user);
+        setDriveToken(token);
+      },
+      () => {
+        setGoogleUser(null);
+        setDriveToken(null);
+      }
+    );
+
+    // Android / Mobile Capacitor Native setup (Status bar & Back button)
+    try {
+      StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
+      StatusBar.setBackgroundColor({ color: '#070b14' }).catch(() => {});
+    } catch {
+      // not in capacitor
+    }
+
+    let backListener: any;
+    try {
+      backListener = CapApp.addListener('backButton', () => {
+        if (isReportOpen) {
+          setIsReportOpen(false);
+        } else if (mobileMenuOpen) {
+          setMobileMenuOpen(false);
+        } else if (activeTab !== 'dashboard') {
+          setActiveTab('dashboard');
+        } else {
+          CapApp.exitApp();
+        }
+      });
+    } catch {
+      // ignore
+    }
+
+    return () => {
+      if (unsubscribe) unsubscribe();
+      if (backListener?.then) {
+        backListener.then((handle: any) => handle?.remove?.());
+      }
+    };
+  }, [fetchLatest, fetchHistory, fetchAlerts, isReportOpen, mobileMenuOpen, activeTab]);
 
   // Live polling
   useEffect(() => {
@@ -128,16 +181,13 @@ export default function App() {
   const handleTriggerDiagnosis = async () => {
     setIsDiagnosing(true);
     try {
-      const res = await fetch('/api/ai/diagnose', { method: 'POST' });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.detailedAiReport) {
-          setAiReportText(data.detailedAiReport);
-        } else {
-          setAiReportText(
-            `Rule-Based Engineering Evaluation:\n• ${data.vibrationAnalysis}\n• ${data.temperatureAnalysis}\n• ${data.acousticAnalysis}\n• Condition Score: ${data.holisticConditionScore}/100\n• Summary: ${data.overallAssessment}\n\nPrescribed Steps:\n${data.cautiousRecommendations.map((r: string, i: number) => `${i + 1}. ${r}`).join('\n')}`
-          );
-        }
+      const data = await apiRequestAiDiagnosis();
+      if (data.detailedAiReport) {
+        setAiReportText(data.detailedAiReport);
+      } else {
+        setAiReportText(
+          `Rule-Based Engineering Evaluation:\n• ${data.vibrationAnalysis}\n• ${data.temperatureAnalysis}\n• ${data.acousticAnalysis}\n• Condition Score: ${data.holisticConditionScore}/100\n• Summary: ${data.overallAssessment}\n\nPrescribed Steps:\n${data.cautiousRecommendations?.map((r: string, i: number) => `${i + 1}. ${r}`).join('\n') || 'Inspect physical mounting and verify sensors.'}`
+        );
       }
     } catch (err) {
       console.error('Diagnosis failed:', err);
@@ -149,11 +199,7 @@ export default function App() {
   // Acknowledge alert
   const handleAcknowledgeAlert = async (alertId: string) => {
     try {
-      await fetch('/api/alerts/acknowledge', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ alertId }),
-      });
+      await apiAcknowledgeAlert(alertId);
       fetchAlerts();
     } catch (err) {
       console.error('Failed to acknowledge alert:', err);
@@ -163,7 +209,7 @@ export default function App() {
   // Clear acknowledged alerts
   const handleClearAcknowledged = async () => {
     try {
-      await fetch('/api/alerts/clear', { method: 'POST' });
+      await apiClearAlerts();
       fetchAlerts();
     } catch (err) {
       console.error('Failed to clear alerts:', err);
@@ -172,15 +218,12 @@ export default function App() {
 
   // Save Settings
   const handleSaveSettings = async (newSettings: Partial<MachineSettings>) => {
-    const res = await fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newSettings),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      setSettings(data.settings);
+    try {
+      const saved = await apiUpdateSettings(newSettings);
+      setSettings(saved);
       fetchLatest();
+    } catch (err) {
+      console.error('Failed to save settings:', err);
     }
   };
 
@@ -229,7 +272,7 @@ export default function App() {
     const headers = [
       'Timestamp',
       'Machine ID',
-      'Vibration RMS (mm/s)',
+      'Vibration RMS (m/s²)',
       'Vibration Resultant (m/s²)',
       'Temperature (°C)',
       'Noise Relative (%)',
@@ -287,6 +330,8 @@ export default function App() {
           onOpenAlerts={() => setActiveTab('dashboard')}
           onToggleMobileMenu={() => setMobileMenuOpen(true)}
           mode={settings.mode}
+          googleUser={googleUser}
+          onOpenGoogleDrive={() => setActiveTab('google-drive')}
         />
 
         {/* Dynamic Page Content */}
@@ -439,8 +484,8 @@ export default function App() {
                 <div className="space-y-6">
                   <div className="flex items-center justify-between">
                     <div>
-                      <h2 className="text-xl font-bold text-white">Machine Health Audit & Compliance Reports</h2>
-                      <p className="text-xs text-slate-400">ISO 10816 machinery vibration standard compliance, statistics, and formal print/export</p>
+                      <h2 className="text-xl font-bold text-white">Machine Health Audit & Condition Reports</h2>
+                      <p className="text-xs text-slate-400">Baseline machinery health assessment, telemetry statistics, and formal print/export</p>
                     </div>
                     <button
                       onClick={() => setIsReportOpen(true)}
@@ -467,7 +512,26 @@ export default function App() {
                 </div>
               )}
 
-              {/* VIEW 6: SETTINGS */}
+              {/* VIEW 6: GOOGLE DRIVE CLOUD STORAGE */}
+              {activeTab === 'google-drive' && (
+                <GoogleDriveView
+                  currentUser={googleUser}
+                  accessToken={driveToken}
+                  onAuthSuccess={(user, token) => {
+                    setGoogleUser(user);
+                    setDriveToken(token);
+                  }}
+                  onSignOut={() => {
+                    setGoogleUser(null);
+                    setDriveToken(null);
+                  }}
+                  latestData={latestData}
+                  historyData={historyData}
+                  settings={settings}
+                />
+              )}
+
+              {/* VIEW 7: SETTINGS */}
               {activeTab === 'settings' && (
                 <div className="space-y-6">
                   <SettingsModal
@@ -496,6 +560,7 @@ export default function App() {
           history={historyData}
           alerts={alerts}
           settings={settings}
+          onOpenGoogleDrive={() => setActiveTab('google-drive')}
         />
 
       </div>

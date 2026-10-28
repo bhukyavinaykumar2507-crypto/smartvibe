@@ -58,7 +58,7 @@ export const AiHealthScorePanel: React.FC<AiHealthScorePanelProps> = ({
                 AI-Based Machine Health Analysis
               </h2>
               <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] font-mono text-cyan-300">
-                ISO 10816 + Heuristics
+                Threshold Rules & Heuristics
               </span>
             </div>
             <p className="text-xs text-slate-400">

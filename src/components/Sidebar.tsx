@@ -8,7 +8,8 @@ import {
   Settings, 
   Radio, 
   Cpu, 
-  X 
+  X,
+  Cloud 
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -34,6 +35,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'history', label: 'Machine History', icon: Clock },
     { id: 'ai-analysis', label: 'AI Analysis', icon: BrainCircuit },
     { id: 'reports', label: 'Reports', icon: FileText },
+    { id: 'google-drive', label: 'Google Drive', icon: Cloud },
     { id: 'settings', label: 'Settings', icon: Settings },
   ];
 

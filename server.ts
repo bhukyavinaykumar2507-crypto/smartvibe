@@ -1,4 +1,5 @@
 import express from 'express';
+import cors from 'cors';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -20,6 +21,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = 3000;
 
+app.use(cors());
 app.use(express.json());
 
 // In-memory state
@@ -32,11 +34,11 @@ let settings: MachineSettings = {
   demoScenario: 'normal',
   tempWarningThreshold: 55,
   tempCriticalThreshold: 75,
-  vibrationBaseline: 1.2,
-  vibrationWarningThreshold: 2.8, // ISO 10816 Zone C boundary
-  vibrationCriticalThreshold: 4.5, // ISO 10816 Zone D boundary
-  noiseWarningThreshold: 68,
-  noiseCriticalThreshold: 85,
+  vibrationBaseline: 1.2, // m/s² baseline acceleration
+  vibrationWarningThreshold: 2.8, // m/s² configured warning threshold
+  vibrationCriticalThreshold: 4.5, // m/s² configured critical threshold
+  noiseWarningThreshold: 68, // % relative noise level
+  noiseCriticalThreshold: 85, // % relative noise level
 };
 
 let telemetryHistory: TelemetryPoint[] = [];
@@ -44,7 +46,7 @@ let alerts: AlertItem[] = [];
 let lastHardwarePacketTime: number = 0;
 let simulationStep = 0;
 
-// Scoring algorithm compliant with ISO 10816-1 severity zones
+// Transparent rule-based health scoring algorithm based on established baseline thresholds
 function evaluateHealth(
   vibrationRMS: number,
   temperature: number,
@@ -88,10 +90,10 @@ function evaluateHealth(
   const recommendations: string[] = [];
 
   if (vibrationRMS >= cfg.vibrationCriticalThreshold) {
-    reasons.push(`Vibration RMS (${vibrationRMS.toFixed(2)} mm/s) severely exceeds ISO 10816 Zone C threshold (${cfg.vibrationCriticalThreshold} mm/s).`);
+    reasons.push(`Vibration RMS (${vibrationRMS.toFixed(2)} m/s²) exceeds configured critical limit (${cfg.vibrationCriticalThreshold} m/s²).`);
     recommendations.push('Immediate mechanical inspection of spindle/bearing assembly; inspect for unbalance or loose coupling.');
   } else if (vibrationRMS >= cfg.vibrationWarningThreshold) {
-    reasons.push(`Vibration RMS (${vibrationRMS.toFixed(2)} mm/s) has entered ISO 10816 Advisory Zone C.`);
+    reasons.push(`Vibration RMS (${vibrationRMS.toFixed(2)} m/s²) has exceeded configured warning threshold (${cfg.vibrationWarningThreshold} m/s²).`);
     recommendations.push('Check sensor ADXL345 magnetic/screw mounting rigidity; verify baseline alignment during off-peak load.');
   }
 
@@ -231,8 +233,8 @@ function createSyntheticDataPoint(timestampStr?: string): TelemetryPoint {
         severity: health.status,
         sensor: sensorName,
         parameter: sensorName.includes('Vibration') ? 'Vibration RMS' : sensorName.includes('Temperature') ? 'Temperature' : 'Acoustic Level',
-        recordedValue: sensorName.includes('Vibration') ? `${rms} mm/s` : sensorName.includes('Temperature') ? `${temp.toFixed(1)}°C` : `${noiseRel.toFixed(1)}%`,
-        thresholdValue: sensorName.includes('Vibration') ? `${settings.vibrationWarningThreshold} mm/s` : sensorName.includes('Temperature') ? `${settings.tempWarningThreshold}°C` : `${settings.noiseWarningThreshold}%`,
+        recordedValue: sensorName.includes('Vibration') ? `${rms} m/s²` : sensorName.includes('Temperature') ? `${temp.toFixed(1)}°C` : `${noiseRel.toFixed(1)}%`,
+        thresholdValue: sensorName.includes('Vibration') ? `${settings.vibrationWarningThreshold} m/s²` : sensorName.includes('Temperature') ? `${settings.tempWarningThreshold}°C` : `${settings.noiseWarningThreshold}%`,
         deviation: `+${((rms - settings.vibrationBaseline) / settings.vibrationBaseline * 100).toFixed(0)}%`,
         suggestedAction: health.recommendations[0] || 'Inspect physical mounting and verify cable connections.',
         acknowledged: false
@@ -251,6 +253,8 @@ function createSyntheticDataPoint(timestampStr?: string): TelemetryPoint {
   const minTemp = Number(Math.min(...tempHistory).toFixed(1));
   const maxTemp = Number(Math.max(...tempHistory).toFixed(1));
 
+  const isLiveConnected = settings.mode === 'live' && (Date.now() - lastHardwarePacketTime < 15000);
+
   return {
     id: `pt-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
     timestamp,
@@ -264,6 +268,7 @@ function createSyntheticDataPoint(timestampStr?: string): TelemetryPoint {
       rms: Number((rms * 0.2 + 0.12).toFixed(2)),
       peak: Number((peak * 0.2 + 0.36).toFixed(2)),
       dominantFrequency: Number((48.7 + (settings.demoScenario === 'unbalance' ? 51.3 : (Math.random() - 0.5) * 0.4)).toFixed(1)),
+      dominantFreqSource: 'demo',
       baseline: settings.vibrationBaseline,
       deviationPercent: Number((((rms - settings.vibrationBaseline) / settings.vibrationBaseline) * 100).toFixed(1)),
       status: vibStatus,
@@ -286,13 +291,11 @@ function createSyntheticDataPoint(timestampStr?: string): TelemetryPoint {
       calibrationNote: 'Uncalibrated relative acoustic envelope index (0-100%). Not calibrated dB SPL.'
     },
     health,
-    deviceStatus: settings.mode === 'live' 
-      ? (Date.now() - lastHardwarePacketTime < 15000 ? 'online' : 'offline')
-      : 'online',
+    deviceStatus: isLiveConnected ? 'online' : 'offline',
     hardware: {
-      adxl345Connected: true,
-      ds18b20Connected: true,
-      max9814Connected: true,
+      adxl345Connected: isLiveConnected,
+      ds18b20Connected: isLiveConnected,
+      max9814Connected: isLiveConnected,
     },
     source: settings.mode === 'live' ? 'esp32_hardware' : 'demo_simulation'
   };
@@ -327,8 +330,8 @@ setInterval(() => {
 // 1. Telemetry Latest
 app.get('/api/telemetry/latest', (_req, res) => {
   const latest = telemetryHistory[telemetryHistory.length - 1] || createSyntheticDataPoint();
-  // Recalculate deviceStatus dynamically
-  const isOnline = settings.mode === 'demo' || (Date.now() - lastHardwarePacketTime < 15000);
+  // Recalculate deviceStatus dynamically: NEVER show 'online' unless live packets arrived in last 15 seconds
+  const isOnline = settings.mode === 'live' && (Date.now() - lastHardwarePacketTime < 15000);
   res.json({
     ...latest,
     deviceStatus: isOnline ? 'online' : 'offline',
@@ -451,7 +454,8 @@ app.post('/api/telemetry', (req, res) => {
         resultant,
         rms,
         peak,
-        dominantFrequency: 48.7,
+        dominantFrequency: req.body.dominant_frequency ? Number(req.body.dominant_frequency) : null,
+        dominantFreqSource: req.body.dominant_frequency ? 'calculated' : 'unavailable',
         baseline: settings.vibrationBaseline,
         deviationPercent: Number((((rms - settings.vibrationBaseline) / settings.vibrationBaseline) * 100).toFixed(1)),
         status: vibStatus
@@ -498,7 +502,7 @@ app.post('/api/ai/diagnose', async (req, res) => {
   const apiKey = process.env.GEMINI_API_KEY;
 
   const baselineRuleAnalysis = {
-    vibrationAnalysis: `ADXL345 recorded resultant vibration is ${latest.vibration.resultant} m/s² with RMS of ${latest.vibration.rms} mm/s (baseline: ${latest.vibration.baseline} mm/s, deviation: ${latest.vibration.deviationPercent}%). According to ISO 10816-1 machinery guidelines, operation sits in ${latest.vibration.status.toUpperCase()} zone.`,
+    vibrationAnalysis: `ADXL345 recorded resultant vibration is ${latest.vibration.resultant} m/s² with RMS of ${latest.vibration.rms} m/s² (baseline: ${latest.vibration.baseline} m/s², deviation: ${latest.vibration.deviationPercent}%). Based on configured machine threshold rules, vibration status sits in ${latest.vibration.status.toUpperCase()} band.`,
     temperatureAnalysis: `DS18B20 digital temperature probe indicates ${latest.temperature.current}°C (warning threshold: ${latest.temperature.warningThreshold}°C, critical: ${latest.temperature.criticalThreshold}°C). Thermal status is ${latest.temperature.status.toUpperCase()}.`,
     acousticAnalysis: `MAX9814 relative acoustic amplitude index is ${latest.noise.relativeLevel}% (peak: ${latest.noise.peakLevel}%). Pattern classified as ${latest.noise.patternState}. Note: Uncalibrated relative microphone signal.`,
     holisticConditionScore: latest.health.score,
@@ -514,7 +518,7 @@ app.post('/api/ai/diagnose', async (req, res) => {
       const prompt = `You are an industrial mechanical reliability engineer analyzing an automated condition-monitoring system called SmartVibe.
 Machine: ${latest.machineName} (${settings.machineType})
 Sensors:
-1. ADXL345 Vibration: Resultant=${latest.vibration.resultant} m/s², RMS=${latest.vibration.rms} mm/s, Peak=${latest.vibration.peak} m/s², Baseline=${latest.vibration.baseline} mm/s
+1. ADXL345 Vibration: Resultant=${latest.vibration.resultant} m/s², RMS=${latest.vibration.rms} m/s², Peak=${latest.vibration.peak} m/s², Baseline=${latest.vibration.baseline} m/s²
 2. DS18B20 Temperature: Current=${latest.temperature.current}°C, Warning=${latest.temperature.warningThreshold}°C, Critical=${latest.temperature.criticalThreshold}°C
 3. MAX9814 Noise: Relative Amplitude Envelope=${latest.noise.relativeLevel}% (uncalibrated ADC index, not dB SPL), Pattern=${latest.noise.patternState}
 Current Health Score: ${latest.health.score}/100 (Status: ${latest.health.status})

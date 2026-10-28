@@ -1,5 +1,9 @@
 /**
  * SmartVibe - Telemetry and Health Data Types
+ * Standardized on:
+ * - Acceleration: m/s² (Resultant, RMS, Peak)
+ * - Temperature: °C
+ * - Acoustic / Noise: Relative Noise Level (%) / Relative Signal Index
  */
 
 export type HealthStatus = 'normal' | 'warning' | 'anomaly';
@@ -8,11 +12,12 @@ export interface VibrationReading {
   x: number; // m/s²
   y: number; // m/s²
   z: number; // m/s²
-  resultant: number; // m/s²
-  rms: number; // mm/s or m/s² RMS velocity/acceleration
-  peak: number; // m/s²
-  dominantFrequency: number; // Hz (dominant spectral harmonic)
-  baseline: number; // m/s² baseline
+  resultant: number; // m/s² dynamic resultant acceleration
+  rms: number; // m/s² acceleration RMS
+  peak: number; // m/s² peak acceleration
+  dominantFrequency: number | null; // Hz (or null if unavailable)
+  dominantFreqSource?: 'calculated' | 'demo' | 'unavailable';
+  baseline: number; // m/s² baseline acceleration
   deviationPercent: number; // % deviation from baseline
   status: HealthStatus;
 }
@@ -27,7 +32,7 @@ export interface TemperatureReading {
 }
 
 export interface NoiseReading {
-  relativeLevel: number; // 0-100% relative envelope amplitude (e.g. dB* index)
+  relativeLevel: number; // 0-100% relative envelope amplitude index (uncalibrated)
   peakLevel: number; // 0-100%
   variance: number;
   patternState: 'steady' | 'periodic_pulses' | 'erratic_bursts';
@@ -37,7 +42,7 @@ export interface NoiseReading {
 }
 
 export interface MachineHealthEvaluation {
-  score: number; // 0 - 100
+  score: number; // 0 - 100 calculated transparently
   status: HealthStatus;
   reasons: string[];
   recommendations: string[];
@@ -95,4 +100,5 @@ export interface MachineSettings {
   vibrationCriticalThreshold: number;
   noiseWarningThreshold: number;
   noiseCriticalThreshold: number;
+  customApiUrl?: string; // Configurable remote API base URL for Android APK
 }

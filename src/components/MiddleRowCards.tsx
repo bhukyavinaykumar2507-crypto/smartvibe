@@ -214,7 +214,7 @@ export const MiddleRowCards: React.FC<MiddleRowCardsProps> = ({
             </div>
             <div className="flex items-center gap-1.5">
               <span className="h-1.5 w-1.5 rounded-full bg-purple-400" />
-              <span className="text-slate-300">Noise (relative)</span>
+              <span className="text-slate-300">Noise (relative %)</span>
             </div>
           </div>
         </div>
@@ -238,9 +238,9 @@ export const MiddleRowCards: React.FC<MiddleRowCardsProps> = ({
             <thead>
               <tr className="border-b border-slate-800/90 text-[10px] text-slate-400">
                 <th className="py-1.5 px-2 font-medium">Time</th>
-                <th className="py-1.5 px-2 font-medium text-right">Vibration</th>
-                <th className="py-1.5 px-2 font-medium text-right">Temp</th>
-                <th className="py-1.5 px-2 font-medium text-right">Noise</th>
+                <th className="py-1.5 px-2 font-medium text-right">Vib (m/s²)</th>
+                <th className="py-1.5 px-2 font-medium text-right">Temp (°C)</th>
+                <th className="py-1.5 px-2 font-medium text-right">Noise (%)</th>
                 <th className="py-1.5 px-2 font-medium text-center">Status</th>
               </tr>
             </thead>

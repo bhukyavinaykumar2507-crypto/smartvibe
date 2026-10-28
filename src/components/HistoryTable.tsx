@@ -36,7 +36,7 @@ export const HistoryTable: React.FC<HistoryTableProps> = ({ points }) => {
     const headers = [
       'Timestamp',
       'Machine ID',
-      'Vibration RMS (mm/s)',
+      'Vibration RMS (m/s²)',
       'Vibration Resultant (m/s²)',
       'Vibration Peak (m/s²)',
       'Temperature (°C)',
@@ -159,7 +159,7 @@ export const HistoryTable: React.FC<HistoryTableProps> = ({ points }) => {
           <thead className="border-b border-slate-800 bg-slate-950/60 font-mono text-[11px] text-slate-400">
             <tr>
               <th className="py-2.5 px-4 font-medium">Timestamp</th>
-              <th className="py-2.5 px-4 font-medium text-right">Vib RMS (mm/s)</th>
+              <th className="py-2.5 px-4 font-medium text-right">Vib RMS (m/s²)</th>
               <th className="py-2.5 px-4 font-medium text-right">Resultant (m/s²)</th>
               <th className="py-2.5 px-4 font-medium text-right">Temp (°C)</th>
               <th className="py-2.5 px-4 font-medium text-right">Noise Rel. (%)</th>
@@ -271,7 +271,7 @@ export const HistoryTable: React.FC<HistoryTableProps> = ({ points }) => {
               <div className="grid grid-cols-2 gap-2 font-mono">
                 <div className="rounded bg-slate-900 p-2.5 border border-slate-800">
                   <span className="text-slate-400 block text-[10px]">ADXL345 Vibration RMS</span>
-                  <span className="text-base font-bold text-indigo-300">{selectedPoint.vibration.rms} mm/s</span>
+                  <span className="text-base font-bold text-indigo-300">{selectedPoint.vibration.rms} m/s²</span>
                   <span className="text-[10px] text-slate-400 block mt-1">
                     Axes: X={selectedPoint.vibration.x}, Y={selectedPoint.vibration.y}, Z={selectedPoint.vibration.z}
                   </span>

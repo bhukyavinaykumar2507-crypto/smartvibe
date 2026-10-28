@@ -51,9 +51,9 @@ export const BottomRowCards: React.FC<BottomRowCardsProps> = ({
       severity: 'info',
       sensor: 'MAX9814 Noise',
       parameter: 'Relative Noise',
-      recordedValue: '95 dB*',
-      thresholdValue: '> 100 dB*',
-      deviation: '+0%',
+      recordedValue: '82%',
+      thresholdValue: '> 68%',
+      deviation: '+20.5%',
       suggestedAction: 'Noise level increased slightly',
       acknowledged: false,
     },
@@ -244,8 +244,8 @@ export const BottomRowCards: React.FC<BottomRowCardsProps> = ({
                 Smart<span className="text-cyan-400">Vibe</span>
               </span>
             </div>
-            <span className="text-[10px] font-mono text-slate-400">
-              ISO 10816 Verified
+            <span className="text-[10px] font-mono text-cyan-400/80">
+              Threshold Monitored
             </span>
           </div>
         </div>

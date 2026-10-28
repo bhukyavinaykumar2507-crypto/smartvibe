@@ -166,7 +166,9 @@ export const SensorCards: React.FC<SensorCardsProps> = ({
             <div>
               <span className="text-[10.5px] text-slate-400 block">Dominant Freq.</span>
               <span className="text-xs font-bold font-mono text-cyan-300 tabular-nums">
-                {vibration.dominantFrequency || 48.7} Hz
+                {vibration.dominantFrequency != null 
+                  ? `${vibration.dominantFrequency} Hz ${vibration.dominantFreqSource === 'demo' ? '(Demo)' : ''}`
+                  : 'Unavailable'}
               </span>
             </div>
           </div>
@@ -250,7 +252,7 @@ export const SensorCards: React.FC<SensorCardsProps> = ({
               <span className="text-3xl font-extrabold font-mono text-white tracking-tight tabular-nums">
                 {Math.round(noise.relativeLevel)}
               </span>
-              <span className="text-sm font-semibold font-mono text-purple-300">dB*</span>
+              <span className="text-sm font-semibold font-mono text-purple-300">%</span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">Relative Noise Level</p>
           </div>
@@ -260,7 +262,7 @@ export const SensorCards: React.FC<SensorCardsProps> = ({
             <div>
               <span className="text-[10.5px] text-slate-400 block">Peak Level</span>
               <span className="text-xs font-bold font-mono text-slate-100 tabular-nums">
-                {Math.round(noise.peakLevel)} dB*
+                {Math.round(noise.peakLevel)}%
               </span>
             </div>
             <div>
