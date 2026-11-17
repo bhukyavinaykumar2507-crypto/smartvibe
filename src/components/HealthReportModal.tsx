@@ -1,16 +1,15 @@
 import React, { useState } from 'react';
-import { Printer, Download, X, ShieldCheck, CheckCircle2, AlertTriangle, ShieldAlert, Cpu, Cloud, ExternalLink } from 'lucide-react';
-import type { TelemetryPoint, MachineSettings, AlertItem } from '../types/telemetry';
-import { uploadReportToDrive, getAccessToken, googleSignIn } from '../services/googleDrive';
+import { FileText, Download, CloudUpload, Printer, X, CheckCircle2 } from 'lucide-react';
+import type { TelemetryPoint, AlertItem } from '../types/telemetry';
+import { uploadReportToDrive, getAccessToken } from '../services/googleDrive';
 
 interface HealthReportModalProps {
   isOpen: boolean;
   onClose: () => void;
-  latest: TelemetryPoint | null;
+  latest: TelemetryPoint;
   history: TelemetryPoint[];
   alerts: AlertItem[];
-  settings: MachineSettings;
-  onOpenGoogleDrive?: () => void;
+  aiSummary: string | null;
 }
 
 export const HealthReportModal: React.FC<HealthReportModalProps> = ({
@@ -19,392 +18,185 @@ export const HealthReportModal: React.FC<HealthReportModalProps> = ({
   latest,
   history,
   alerts,
-  settings,
-  onOpenGoogleDrive,
+  aiSummary,
 }) => {
+  const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
   if (!isOpen) return null;
 
-  const [isSavingToDrive, setIsSavingToDrive] = useState(false);
-  const [driveUploadResult, setDriveUploadResult] = useState<{ name: string; url?: string } | null>(null);
-  const [driveError, setDriveError] = useState<string | null>(null);
+  const avgVib = history.length
+    ? (history.reduce((s, p) => s + p.vibration.resultant, 0) / history.length).toFixed(2)
+    : latest.vibration.resultant.toFixed(2);
+  const avgNoise = history.length
+    ? Math.round(history.reduce((s, p) => s + p.noise.relativeLevel, 0) / history.length)
+    : latest.noise.relativeLevel;
+
+  const buildReportHtml = () => {
+    const generatedAt = new Date().toLocaleString();
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SmartVibe Machine Health Report — ${latest.machineName}</title>
+  <style>
+    body { font-family: Arial, sans-serif; color: #0f172a; max-width: 820px; margin: 32px auto; padding: 0 20px; }
+    h1 { color: #0e7490; margin-bottom: 4px; }
+    .meta { color: #475569; font-size: 13px; margin-bottom: 24px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+    .card { border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; background: #f8fafc; }
+    .label { font-size: 11px; text-transform: uppercase; color: #64748b; }
+    .val { font-size: 20px; font-weight: bold; margin-top: 4px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 12px; }
+    th, td { border: 1px solid #cbd5e1; padding: 8px; text-align: left; }
+    th { background: #e2e8f0; }
+  </style>
+</head>
+<body>
+  <h1>SmartVibe — Machine Health Report</h1>
+  <div class="meta">Machine: ${latest.machineName} | Mode: ${latest.mode.toUpperCase()} | Generated: ${generatedAt}</div>
+  <div class="grid">
+    <div class="card"><div class="label">Overall Health Score</div><div class="val">${latest.health.score}/100 (${latest.health.status.toUpperCase()})</div></div>
+    <div class="card"><div class="label">ADXL345 Vibration</div><div class="val">${latest.vibration.resultant.toFixed(2)} m/s² (Avg ${avgVib})</div></div>
+    <div class="card"><div class="label">MAX9814 Relative Noise</div><div class="val">${latest.noise.relativeLevel}% (Avg ${avgNoise}%)</div></div>
+  </div>
+  <h3>Diagnostic Summary</h3>
+  <p>${(aiSummary || latest.health.recommendation).replace(/\n/g, '<br/>')}</p>
+  <h3>Recent Alerts (${alerts.length})</h3>
+  <table>
+    <thead><tr><th>Time</th><th>Severity</th><th>Sensor</th><th>Value</th><th>Message</th></tr></thead>
+    <tbody>
+      ${alerts.slice(0, 12).map((a) => `<tr><td>${new Date(a.timestamp).toLocaleTimeString()}</td><td>${a.severity}</td><td>${a.sensor}</td><td>${a.value}</td><td>${a.message}</td></tr>`).join('') || '<tr><td colspan="5">No alerts recorded</td></tr>'}
+    </tbody>
+  </table>
+</body>
+</html>`;
+  };
+
+  const handleDownloadHtml = () => {
+    const html = buildReportHtml();
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `smartvibe-report-${latest.machineId}-${new Date().toISOString().slice(0, 10)}.html`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const handlePrint = () => {
     window.print();
   };
 
-  const generateReportJSON = () => {
-    return {
-      project: 'SmartVibe — AI-Based Machine Health Monitoring System',
-      generatedAt: new Date().toISOString(),
-      machine: settings,
-      latestMetrics: latest,
-      recentAlerts: alerts.slice(0, 10),
-      historicalSummary: {
-        totalSamples: history.length,
-        vibrationRmsMean: history.length ? (history.reduce((a, b) => a + b.vibration.rms, 0) / history.length).toFixed(2) : 'Data unavailable',
-        temperatureMean: history.length ? (history.reduce((a, b) => a + b.temperature.current, 0) / history.length).toFixed(1) : 'Data unavailable',
-        noiseRelativeMean: history.length ? (history.reduce((a, b) => a + b.noise.relativeLevel, 0) / history.length).toFixed(1) : 'Data unavailable',
-      }
-    };
-  };
-
-  const handleDownloadJSON = () => {
-    const reportData = generateReportJSON();
-    const blob = new Blob([JSON.stringify(reportData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `SmartVibe_Health_Report_${settings.machineId}_${Date.now()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handleSaveToDrive = async () => {
-    setIsSavingToDrive(true);
-    setDriveError(null);
-    setDriveUploadResult(null);
-
+  const handleUploadDrive = async () => {
+    setUploading(true);
+    setUploadStatus(null);
+    setUploadError(null);
     try {
-      let token = await getAccessToken();
-      if (!token) {
-        const authResult = await googleSignIn();
-        if (!authResult) throw new Error('Google Sign-In was cancelled');
-        token = authResult.accessToken;
-      }
-
-      const reportData = generateReportJSON();
-      const filename = `SmartVibe_Health_Audit_${settings.machineId}_${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-      const uploaded = await uploadReportToDrive(filename, JSON.stringify(reportData, null, 2), 'application/json');
-
-      setDriveUploadResult({
-        name: uploaded.name,
-        url: uploaded.webViewLink
-      });
-    } catch (err: any) {
-      setDriveError(err.message || 'Failed to save to Google Drive');
+      const html = buildReportHtml();
+      const fileName = `SmartVibe_Report_${latest.machineId}_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.html`;
+      const uploaded = await uploadReportToDrive(fileName, html, 'text/html');
+      setUploadStatus(`Uploaded "${uploaded.name}" to Google Drive.`);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Drive upload failed.');
     } finally {
-      setIsSavingToDrive(false);
+      setUploading(false);
     }
   };
 
-  // Safe metrics calculation
-  const vibRms = latest ? `${latest.vibration.rms} m/s²` : 'Data unavailable';
-  const vibResultant = latest ? `${latest.vibration.resultant} m/s²` : 'Data unavailable';
-  const vibPeak = latest ? `${latest.vibration.peak} m/s²` : 'Data unavailable';
-  const tempCurrent = latest ? `${latest.temperature.current} °C` : 'Data unavailable';
-  const tempMin = latest ? `${latest.temperature.min} °C` : 'Data unavailable';
-  const tempMax = latest ? `${latest.temperature.max} °C` : 'Data unavailable';
-  const noiseLevel = latest ? `${latest.noise.relativeLevel}%` : 'Data unavailable';
-  const noisePeak = latest ? `${latest.noise.peakLevel}%` : 'Data unavailable';
-  const healthScore = latest ? `${latest.health.score} / 100` : 'Data unavailable';
-  const overallCondition = latest ? latest.health.status.toUpperCase() : 'Data unavailable';
+  const hasDriveToken = Boolean(getAccessToken());
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-md overflow-y-auto">
-      <div className="relative my-8 w-full max-w-4xl rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl print:m-0 print:w-full print:border-none print:shadow-none print:bg-white print:text-black">
-        
-        {/* Modal Top Actions (Hidden in print) */}
-        <div className="no-print flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 p-4 bg-slate-950/80 rounded-t-2xl">
-          <div className="flex items-center gap-2">
-            <Cpu className="h-5 w-5 text-cyan-400" />
-            <span className="text-sm font-semibold text-white">Machine Health Audit Report</span>
-            <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] font-mono text-cyan-300">
-              Audit & Inspection Format
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative z-10 w-full max-w-2xl rounded-2xl border border-slate-800 bg-[#0b1322] p-6 shadow-2xl sv-tab-enter max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-4">
+          <div className="flex items-center gap-2.5">
+            <FileText className="h-5 w-5 text-cyan-400" />
+            <div>
+              <h3 className="text-base font-bold text-white">Machine Health Report</h3>
+              <p className="text-xs text-slate-400">
+                2-Sensor Summary (ADXL345 Vibration + MAX9814 Noise)
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close report modal"
+            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
+          >
+            <X className="h-4.5 w-4.5" />
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5">
+          <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
+            <span className="text-[10.5px] text-slate-400 uppercase block">Health Score</span>
+            <span className="text-xl font-extrabold font-mono text-white">
+              {latest.health.score}/100
             </span>
+            <span className="text-xs text-cyan-400 block capitalize">{latest.health.status}</span>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleSaveToDrive}
-              disabled={isSavingToDrive}
-              className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-500 transition-colors cursor-pointer disabled:opacity-50"
-              title="Backup audit report directly to Google Drive"
-            >
-              <Cloud className="h-3.5 w-3.5" />
-              <span>{isSavingToDrive ? 'Saving...' : 'Save to Drive'}</span>
-            </button>
-            <button
-              onClick={handlePrint}
-              className="flex items-center gap-1.5 rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-500 transition-colors cursor-pointer"
-            >
-              <Printer className="h-3.5 w-3.5" />
-              <span>Print / Save PDF</span>
-            </button>
-            <button
-              onClick={handleDownloadJSON}
-              className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-700 transition-colors cursor-pointer"
-            >
-              <Download className="h-3.5 w-3.5" />
-              <span>JSON</span>
-            </button>
-            <button
-              onClick={onClose}
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
-            >
-              <X className="h-4 w-4" />
-            </button>
+          <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
+            <span className="text-[10.5px] text-slate-400 uppercase block">ADXL345 Avg Vib</span>
+            <span className="text-xl font-extrabold font-mono text-cyan-300">{avgVib} m/s²</span>
+            <span className="text-xs text-slate-400 block">Peak {latest.vibration.peak.toFixed(2)} m/s²</span>
+          </div>
+          <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-3.5">
+            <span className="text-[10.5px] text-slate-400 uppercase block">MAX9814 Avg Noise</span>
+            <span className="text-xl font-extrabold font-mono text-purple-300">{avgNoise}%</span>
+            <span className="text-xs text-slate-400 block">Peak {latest.noise.peakLevel}%</span>
           </div>
         </div>
 
-        {/* Drive notification status */}
-        {driveUploadResult && (
-          <div className="no-print mx-4 mt-3 flex items-center justify-between rounded-xl border border-blue-500/40 bg-blue-950/30 p-3 text-xs text-blue-300">
-            <div className="flex items-center gap-2">
-              <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
-              <span>Saved <strong>{driveUploadResult.name}</strong> to Google Drive!</span>
-            </div>
-            {driveUploadResult.url && (
-              <a
-                href={driveUploadResult.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 rounded bg-blue-800/60 px-2 py-1 font-semibold text-white hover:bg-blue-700 transition-colors"
-              >
-                <span>View in Drive</span>
-                <ExternalLink className="h-3 w-3" />
-              </a>
-            )}
-          </div>
-        )}
-
-        {driveError && (
-          <div className="no-print mx-4 mt-3 flex items-center gap-2 rounded-xl border border-rose-500/40 bg-rose-950/30 p-3 text-xs text-rose-300">
-            <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0" />
-            <span>{driveError}</span>
-          </div>
-        )}
-
-        {/* PRINTABLE REPORT BODY */}
-        <div className="p-8 space-y-6 text-slate-200 print:text-slate-900 print:p-4">
-          
-          {/* Header Banner */}
-          <div className="border-b border-slate-700 pb-5 print:border-slate-300">
-            <div className="flex items-start justify-between">
-              <div>
-                <h1 className="text-2xl font-bold tracking-tight text-white print:text-slate-900">
-                  SMARTVIBE CONDITION AUDIT REPORT
-                </h1>
-                <p className="text-xs text-cyan-400 print:text-slate-600 font-mono mt-0.5">
-                  AI-Based Machine Health & Predictive Telemetry System
-                </p>
-              </div>
-              <div className="text-right text-xs font-mono text-slate-400 print:text-slate-600 space-y-0.5">
-                <p>Report Ref: SV-{Date.now().toString().slice(-6)}</p>
-                <p>Date: {new Date().toLocaleDateString()}</p>
-                <p>Time: {new Date().toLocaleTimeString()}</p>
-              </div>
-            </div>
-
-            {/* Equipment Meta Strip */}
-            <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3 rounded-lg bg-slate-950/70 p-3 text-xs border border-slate-800 print:bg-slate-100 print:border-slate-300 print:text-slate-800">
-              <div>
-                <span className="text-[10px] text-slate-400 print:text-slate-500 block uppercase font-mono">Equipment</span>
-                <span className="font-semibold text-white print:text-slate-900">{settings.machineName}</span>
-              </div>
-              <div>
-                <span className="text-[10px] text-slate-400 print:text-slate-500 block uppercase font-mono">Location</span>
-                <span className="font-semibold text-white print:text-slate-900">{settings.location}</span>
-              </div>
-              <div>
-                <span className="text-[10px] text-slate-400 print:text-slate-500 block uppercase font-mono">Overall Health</span>
-                <span className="font-mono font-bold text-cyan-400 print:text-blue-700">{healthScore}</span>
-              </div>
-              <div>
-                <span className="text-[10px] text-slate-400 print:text-slate-500 block uppercase font-mono">Standard Ref.</span>
-                <span className="font-mono text-slate-300 print:text-slate-700">Configured Baseline Limits</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Section 1: Executive Condition Assessment */}
-          <div>
-            <h2 className="text-sm font-bold uppercase tracking-wider text-cyan-400 print:text-blue-800 border-b border-slate-800 pb-1 mb-3">
-              1. Executive Health Evaluation
-            </h2>
-            <div className="rounded-lg bg-slate-950/40 p-4 border border-slate-800 print:bg-slate-50 print:border-slate-300 space-y-2 text-xs leading-relaxed">
-              <p>
-                <strong>Current Status:</strong> <span className="font-semibold uppercase">{overallCondition}</span> (Health Score: {healthScore})
-              </p>
-              <p>
-                {latest?.health.reasons[0] || 'Machine is running within established baseline tolerances. Vibration acceleration and thermal dissipation align with configured equipment baseline specifications.'}
-              </p>
-              <div className="pt-1 text-[11px] text-slate-400 print:text-slate-600 italic">
-                {latest?.health.disclaimer || 'Advisory Notice: Sensor readings indicate operational condition. Certified physical inspection is recommended prior to disassembly.'}
-              </div>
-            </div>
-          </div>
-
-          {/* Section 2: Sensor Telemetry Statistics */}
-          <div>
-            <h2 className="text-sm font-bold uppercase tracking-wider text-cyan-400 print:text-blue-800 border-b border-slate-800 pb-1 mb-3">
-              2. Sensor Telemetry Snapshot & Calibration Status
-            </h2>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs border border-slate-800 print:border-slate-300">
-                <thead className="bg-slate-950 print:bg-slate-200 font-mono text-[11px] text-slate-400 print:text-slate-700">
-                  <tr>
-                    <th className="p-2 border border-slate-800 print:border-slate-300">Sensor Module</th>
-                    <th className="p-2 border border-slate-800 print:border-slate-300">Target Parameter</th>
-                    <th className="p-2 border border-slate-800 print:border-slate-300 text-right">Recorded Value</th>
-                    <th className="p-2 border border-slate-800 print:border-slate-300 text-right">Warning Limit</th>
-                    <th className="p-2 border border-slate-800 print:border-slate-300 text-center">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800 font-mono">
-                  <tr>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 font-sans">
-                      ADXL345 Accelerometer (I2C)
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 font-sans">
-                      RMS Acceleration
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 text-right font-bold text-indigo-300 print:text-indigo-800">
-                      {vibRms}
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 text-right text-slate-400 print:text-slate-600">
-                      {settings.vibrationWarningThreshold} m/s²
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 text-center font-sans font-semibold uppercase">
-                      {latest?.vibration.status || 'Data unavailable'}
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 font-sans">
-                      ADXL345 Accelerometer (I2C)
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 font-sans">
-                      Resultant Dynamic Accel.
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 text-right font-bold text-slate-200 print:text-slate-800">
-                      {vibResultant}
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 text-right text-slate-400 print:text-slate-600">
-                      Peak: {vibPeak}
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 text-center font-sans font-semibold uppercase">
-                      {latest?.vibration.status || 'Data unavailable'}
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 font-sans">
-                      DS18B20 Digital Probe (1-Wire)
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 font-sans">
-                      Casing Surface Temp.
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 text-right font-bold text-emerald-300 print:text-emerald-800">
-                      {tempCurrent}
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 text-right text-slate-400 print:text-slate-600">
-                      {settings.tempWarningThreshold} °C
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 text-center font-sans font-semibold uppercase">
-                      {latest?.temperature.status || 'Data unavailable'}
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 font-sans">
-                      MAX9814 Microphone (ADC)
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 font-sans">
-                      Relative Noise Envelope
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 text-right font-bold text-cyan-300 print:text-cyan-800">
-                      {noiseLevel}
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 text-right text-slate-400 print:text-slate-600">
-                      {settings.noiseWarningThreshold} %
-                    </td>
-                    <td className="p-2 border border-slate-800 print:border-slate-300 text-center font-sans font-semibold uppercase">
-                      {latest?.noise.status || 'Data unavailable'}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <p className="mt-2 text-[10.5px] text-slate-400 print:text-slate-600 italic">
-              * Note on MAX9814 readings: Displayed as uncalibrated relative acoustic envelope index (0-100%). Readings do not represent calibrated dB SPL.
-            </p>
-          </div>
-
-          {/* Section 3: Abnormal Events & Alert History */}
-          <div>
-            <h2 className="text-sm font-bold uppercase tracking-wider text-cyan-400 print:text-blue-800 border-b border-slate-800 pb-1 mb-3">
-              3. Recent Abnormal Events & Threshold Deviations
-            </h2>
-            {alerts.length === 0 ? (
-              <p className="text-xs text-slate-400 print:text-slate-600 italic">
-                No abnormal exceedance events recorded during this monitoring period.
-              </p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs border border-slate-800 print:border-slate-300">
-                  <thead className="bg-slate-950 print:bg-slate-200 font-mono text-[10px] text-slate-400 print:text-slate-700">
-                    <tr>
-                      <th className="p-1.5 border border-slate-800 print:border-slate-300">Time</th>
-                      <th className="p-1.5 border border-slate-800 print:border-slate-300">Severity</th>
-                      <th className="p-1.5 border border-slate-800 print:border-slate-300">Sensor Responsible</th>
-                      <th className="p-1.5 border border-slate-800 print:border-slate-300">Value vs. Threshold</th>
-                      <th className="p-1.5 border border-slate-800 print:border-slate-300">Prescribed Action</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800 text-[11px]">
-                    {alerts.slice(0, 5).map((a) => (
-                      <tr key={a.id}>
-                        <td className="p-1.5 font-mono whitespace-nowrap">{new Date(a.timestamp).toLocaleTimeString()}</td>
-                        <td className="p-1.5 uppercase font-bold text-amber-400 print:text-amber-700">{a.severity}</td>
-                        <td className="p-1.5">{a.sensor}</td>
-                        <td className="p-1.5 font-mono">{a.recordedValue} (Limit: {a.thresholdValue})</td>
-                        <td className="p-1.5 text-slate-300 print:text-slate-700">{a.suggestedAction}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-
-          {/* Section 4: Cautious Recommendations */}
-          <div>
-            <h2 className="text-sm font-bold uppercase tracking-wider text-cyan-400 print:text-blue-800 border-b border-slate-800 pb-1 mb-3">
-              4. Engineering Recommendations
-            </h2>
-            <ul className="list-disc list-inside space-y-1.5 text-xs text-slate-300 print:text-slate-800">
-              {latest?.health.recommendations.map((rec, i) => (
-                <li key={i}>{rec}</li>
-              )) || (
-                <li>Verify sensor mechanical mounting rigidity and cabling integrity.</li>
-              )}
-              <li>Log vibration spectrum across multiple spindle RPM operating points to isolate harmonic resonances.</li>
-              <li>Schedule acoustic stethoscope and thermography verification prior to any scheduled downtime.</li>
-            </ul>
-          </div>
-
-          {/* Section 5: Demonstration Sign-Off Block (for College Engineering Project) */}
-          <div className="pt-4 border-t border-slate-700 print:border-slate-400">
-            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 print:text-slate-600 mb-3">
-              5. Academic Project Verification & Demonstration Sign-Off
-            </h2>
-            <div className="grid grid-cols-3 gap-4 text-xs font-mono">
-              <div className="rounded border border-slate-800 p-2 print:border-slate-300">
-                <span className="text-[10px] text-slate-500 block">Student Investigator:</span>
-                <span className="font-semibold text-slate-200 print:text-slate-900 block mt-1">B. Vinay Kumar</span>
-                <span className="text-[10px] text-slate-400 print:text-slate-600">Roll: IoT / AI Engineering</span>
-              </div>
-              <div className="rounded border border-slate-800 p-2 print:border-slate-300">
-                <span className="text-[10px] text-slate-500 block">Project Supervisor:</span>
-                <span className="font-semibold text-slate-200 print:text-slate-900 block mt-1">Verified & Reviewed</span>
-                <span className="text-[10px] text-slate-400 print:text-slate-600">Signature: ________________</span>
-              </div>
-              <div className="rounded border border-slate-800 p-2 print:border-slate-300">
-                <span className="text-[10px] text-slate-500 block">Test Rig Status:</span>
-                <span className="font-semibold text-emerald-400 print:text-emerald-700 block mt-1">PASS / OPERATIONAL</span>
-                <span className="text-[10px] text-slate-400 print:text-slate-600">Lab Bay 3 / Bench A</span>
-              </div>
-            </div>
-          </div>
-
+        <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 mb-5">
+          <h4 className="text-xs font-bold text-slate-300 mb-1.5">AI & Rule Diagnostic Summary</h4>
+          <p className="text-xs text-slate-300 whitespace-pre-wrap leading-relaxed">
+            {aiSummary || latest.health.recommendation}
+          </p>
         </div>
 
+        {uploadStatus && (
+          <div className="mb-4 flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-950/30 p-3 text-xs text-emerald-300">
+            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+            <span>{uploadStatus}</span>
+          </div>
+        )}
+
+        {uploadError && (
+          <div className="mb-4 rounded-xl border border-rose-500/40 bg-rose-950/30 p-3 text-xs text-rose-300">
+            {uploadError}
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center justify-end gap-2.5 pt-2 border-t border-slate-800">
+          <button
+            onClick={handlePrint}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-2 text-xs font-semibold text-white hover:bg-slate-700 transition-colors"
+          >
+            <Printer className="h-4 w-4" />
+            <span>Print / Save PDF</span>
+          </button>
+
+          <button
+            onClick={handleDownloadHtml}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-cyan-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-cyan-500 transition-colors"
+          >
+            <Download className="h-4 w-4" />
+            <span>Download Report</span>
+          </button>
+
+          <button
+            onClick={handleUploadDrive}
+            disabled={uploading || !hasDriveToken}
+            title={hasDriveToken ? 'Upload to SmartVibe_Machine_Reports' : 'Sign in via Google Drive tab first'}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-500 disabled:opacity-50 transition-colors"
+          >
+            <CloudUpload className="h-4 w-4" />
+            <span>{uploading ? 'Uploading...' : 'Save to Google Drive'}</span>
+          </button>
+        </div>
       </div>
     </div>
   );

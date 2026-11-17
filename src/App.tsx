@@ -1,570 +1,347 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import React, { useState, useEffect, useCallback } from 'react';
-import { Sidebar } from './components/Sidebar';
+import type { User as FirebaseUser } from 'firebase/auth';
+import { Sidebar, type NavTab } from './components/Sidebar';
 import { Header } from './components/Header';
 import { SensorCards } from './components/SensorCards';
 import { IndividualTrendCharts } from './components/IndividualTrendCharts';
 import { MiddleRowCards } from './components/MiddleRowCards';
 import { BottomRowCards } from './components/BottomRowCards';
+import { TelemetryCharts } from './components/TelemetryCharts';
 import { HistoryTable } from './components/HistoryTable';
-import { AlertsPanel } from './components/AlertsPanel';
 import { AiHealthScorePanel } from './components/AiHealthScorePanel';
+import { AlertsPanel } from './components/AlertsPanel';
 import { HealthReportModal } from './components/HealthReportModal';
-import { HardwareGuide } from './components/HardwareGuide';
 import { SettingsModal } from './components/SettingsModal';
+import { HardwareGuide } from './components/HardwareGuide';
 import { GoogleDriveView } from './components/GoogleDriveView';
-import { initAuth, logoutGoogle } from './services/googleDrive';
-import { 
-  fetchLatestTelemetry, 
-  fetchTelemetryHistory, 
-  fetchAlerts as apiFetchAlerts, 
-  acknowledgeAlert as apiAcknowledgeAlert, 
-  clearAcknowledgedAlerts as apiClearAlerts, 
-  updateSettings as apiUpdateSettings, 
-  requestAiDiagnosis as apiRequestAiDiagnosis 
+import {
+  fetchLatestTelemetry,
+  fetchTelemetryHistory,
+  fetchAlerts,
+  acknowledgeAlert,
+  clearAllAlerts,
+  fetchSettings,
+  updateSettings,
+  runAiDiagnosis,
 } from './services/api';
-import { App as CapApp } from '@capacitor/app';
-import { StatusBar, Style } from '@capacitor/status-bar';
-import type { User as FirebaseUser } from 'firebase/auth';
-import type { 
-  TelemetryPoint, 
-  MachineSettings, 
-  AlertItem, 
-  HealthStatus 
+import { initAuth } from './services/googleDrive';
+import type {
+  TelemetryPoint,
+  AlertItem,
+  MachineSettings,
 } from './types/telemetry';
 
-export default function App() {
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
+export function App() {
+  const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [isStreaming, setIsStreaming] = useState(true);
-  const [selectedRange, setSelectedRange] = useState<'15m' | '1h' | '24h' | '7d'>('15m');
-  const [isReportOpen, setIsReportOpen] = useState(false);
 
-  // Telemetry data states
+  const [currentMachineId, setCurrentMachineId] = useState('machine_01');
+  const [selectedRange, setSelectedRange] = useState<'15m' | '1h' | '24h' | '7d'>('15m');
+  const [isStreaming, setIsStreaming] = useState(true);
+
   const [latestData, setLatestData] = useState<TelemetryPoint | null>(null);
   const [historyData, setHistoryData] = useState<TelemetryPoint[]>([]);
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [settings, setSettings] = useState<MachineSettings>({
     machineId: 'machine_01',
-    machineName: 'Machine 01 — CNC Spindle Drive',
-    machineType: 'Three-Phase AC Induction Motor & Milling Spindle',
-    location: 'Lab Test Bay 3 / Bench A',
+    machineName: 'Machine 01',
     mode: 'demo',
-    demoScenario: 'normal',
-    tempWarningThreshold: 55,
-    tempCriticalThreshold: 70,
-    vibrationBaseline: 1.2,
-    vibrationWarningThreshold: 2.8,
-    vibrationCriticalThreshold: 4.5,
-    noiseWarningThreshold: 68,
-    noiseCriticalThreshold: 85,
+    vibWarningThreshold: 0.45,
+    vibAnomalyThreshold: 0.85,
+    noiseWarningThreshold: 72,
+    noiseAnomalyThreshold: 88,
+    esp32TimeoutSeconds: 15,
   });
 
-  const [isLoading, setIsLoading] = useState(true);
+  const [alertsOpen, setAlertsOpen] = useState(false);
+  const [reportModalOpen, setReportModalOpen] = useState(false);
+
+  const [aiReport, setAiReport] = useState<string | null>(null);
+  const [aiGeneratedBy, setAiGeneratedBy] = useState<'gemini' | 'rule-engine' | undefined>(
+    undefined
+  );
   const [isDiagnosing, setIsDiagnosing] = useState(false);
-  const [aiReportText, setAiReportText] = useState<string | null>(null);
-  const [isSendingPacket, setIsSendingPacket] = useState(false);
 
-  // Google Drive Auth state
   const [googleUser, setGoogleUser] = useState<FirebaseUser | null>(null);
-  const [driveToken, setDriveToken] = useState<string | null>(null);
 
-  // Fetch latest telemetry using centralized api service
-  const fetchLatest = useCallback(async () => {
-    try {
-      const data = await fetchLatestTelemetry();
-      setLatestData(data.point);
-      if (data.settings) setSettings(data.settings);
-    } catch (err) {
-      console.warn('Failed to fetch latest telemetry:', err);
-    }
-  }, []);
-
-  // Fetch history
-  const fetchHistory = useCallback(async (range = selectedRange) => {
-    try {
-      const points = await fetchTelemetryHistory(range);
-      if (Array.isArray(points)) {
-        setHistoryData(points);
-      }
-    } catch (err) {
-      console.warn('Failed to fetch history:', err);
-    }
-  }, [selectedRange]);
-
-  // Fetch alerts
-  const fetchAlerts = useCallback(async () => {
-    try {
-      const data = await apiFetchAlerts();
-      setAlerts(data);
-    } catch (err) {
-      console.warn('Failed to fetch alerts:', err);
-    }
-  }, []);
-
-  // Initial load
   useEffect(() => {
-    async function init() {
-      setIsLoading(true);
-      await Promise.all([fetchLatest(), fetchHistory(), fetchAlerts()]);
-      setIsLoading(false);
-    }
-    init();
+    const unsubscribe = initAuth((user) => {
+      setGoogleUser(user);
+    });
+    return unsubscribe;
+  }, []);
 
-    // Listen to Google Drive Auth state
-    const unsubscribe = initAuth(
-      (user, token) => {
-        setGoogleUser(user);
-        setDriveToken(token);
-      },
-      () => {
-        setGoogleUser(null);
-        setDriveToken(null);
-      }
-    );
-
-    // Android / Mobile Capacitor Native setup (Status bar & Back button)
+  const loadAll = useCallback(async () => {
     try {
-      StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
-      StatusBar.setBackgroundColor({ color: '#070b14' }).catch(() => {});
-    } catch {
-      // not in capacitor
+      const [latest, hist, alts, cfg] = await Promise.all([
+        fetchLatestTelemetry(currentMachineId),
+        fetchTelemetryHistory(selectedRange, currentMachineId),
+        fetchAlerts(),
+        fetchSettings(),
+      ]);
+      setLatestData(latest);
+      setHistoryData(hist);
+      setAlerts(alts);
+      setSettings(cfg);
+    } catch (err) {
+      console.error('Failed to load telemetry:', err);
     }
+  }, [currentMachineId, selectedRange]);
 
-    let backListener: any;
-    try {
-      backListener = CapApp.addListener('backButton', () => {
-        if (isReportOpen) {
-          setIsReportOpen(false);
-        } else if (mobileMenuOpen) {
-          setMobileMenuOpen(false);
-        } else if (activeTab !== 'dashboard') {
-          setActiveTab('dashboard');
-        } else {
-          CapApp.exitApp();
-        }
-      });
-    } catch {
-      // ignore
-    }
+  useEffect(() => {
+    loadAll();
+  }, [loadAll]);
 
-    return () => {
-      if (unsubscribe) unsubscribe();
-      if (backListener?.then) {
-        backListener.then((handle: any) => handle?.remove?.());
-      }
-    };
-  }, [fetchLatest, fetchHistory, fetchAlerts, isReportOpen, mobileMenuOpen, activeTab]);
-
-  // Live polling
+  // Real-time 2s polling when streaming is active
   useEffect(() => {
     if (!isStreaming) return;
-    const interval = setInterval(() => {
-      fetchLatest();
-      fetchHistory(selectedRange);
-      fetchAlerts();
+    const interval = setInterval(async () => {
+      try {
+        const [latest, hist, alts] = await Promise.all([
+          fetchLatestTelemetry(currentMachineId),
+          fetchTelemetryHistory(selectedRange, currentMachineId),
+          fetchAlerts(),
+        ]);
+        setLatestData(latest);
+        setHistoryData(hist);
+        setAlerts(alts);
+      } catch {
+        // Ignore transient poll glitches
+      }
     }, 2000);
     return () => clearInterval(interval);
-  }, [isStreaming, fetchLatest, fetchHistory, fetchAlerts, selectedRange]);
+  }, [isStreaming, currentMachineId, selectedRange]);
 
-  // Handle Range change
-  const handleRangeChange = (range: '15m' | '1h' | '24h' | '7d') => {
-    setSelectedRange(range);
-    fetchHistory(range);
+  const handleSelectMachine = (machineId: string) => {
+    setCurrentMachineId(machineId);
+    setAiReport(null);
   };
 
-  // Trigger Deep AI Diagnosis
-  const handleTriggerDiagnosis = async () => {
+  const handleSwitchMode = async (newMode: 'demo' | 'live') => {
+    const updated = await updateSettings({ mode: newMode });
+    setSettings(updated);
+    await loadAll();
+  };
+
+  const handleSaveSettings = async (patch: Partial<MachineSettings>) => {
+    const updated = await updateSettings(patch);
+    setSettings(updated);
+    await loadAll();
+  };
+
+  const handleAcknowledgeAlert = async (id: string) => {
+    await acknowledgeAlert(id);
+    setAlerts((prev) =>
+      prev.map((a) => (a.id === id ? { ...a, acknowledged: true } : a))
+    );
+  };
+
+  const handleClearAlerts = async () => {
+    await clearAllAlerts();
+    setAlerts([]);
+  };
+
+  const handleRunAiDiagnosis = async () => {
     setIsDiagnosing(true);
     try {
-      const data = await apiRequestAiDiagnosis();
-      if (data.detailedAiReport) {
-        setAiReportText(data.detailedAiReport);
-      } else {
-        setAiReportText(
-          `Rule-Based Engineering Evaluation:\n• ${data.vibrationAnalysis}\n• ${data.temperatureAnalysis}\n• ${data.acousticAnalysis}\n• Condition Score: ${data.holisticConditionScore}/100\n• Summary: ${data.overallAssessment}\n\nPrescribed Steps:\n${data.cautiousRecommendations?.map((r: string, i: number) => `${i + 1}. ${r}`).join('\n') || 'Inspect physical mounting and verify sensors.'}`
-        );
-      }
-    } catch (err) {
-      console.error('Diagnosis failed:', err);
+      const res = await runAiDiagnosis(currentMachineId);
+      setAiReport(res.detailedReport);
+      setAiGeneratedBy(res.generatedBy);
     } finally {
       setIsDiagnosing(false);
     }
   };
 
-  // Acknowledge alert
-  const handleAcknowledgeAlert = async (alertId: string) => {
-    try {
-      await apiAcknowledgeAlert(alertId);
-      fetchAlerts();
-    } catch (err) {
-      console.error('Failed to acknowledge alert:', err);
-    }
-  };
-
-  // Clear acknowledged alerts
-  const handleClearAcknowledged = async () => {
-    try {
-      await apiClearAlerts();
-      fetchAlerts();
-    } catch (err) {
-      console.error('Failed to clear alerts:', err);
-    }
-  };
-
-  // Save Settings
-  const handleSaveSettings = async (newSettings: Partial<MachineSettings>) => {
-    try {
-      const saved = await apiUpdateSettings(newSettings);
-      setSettings(saved);
-      fetchLatest();
-    } catch (err) {
-      console.error('Failed to save settings:', err);
-    }
-  };
-
-  // Select Machine from header
-  const handleSelectMachine = (machineId: string) => {
-    handleSaveSettings({
-      machineId,
-      machineName: machineId === 'machine_01' 
-        ? 'Machine 01 — CNC Spindle Drive' 
-        : machineId === 'machine_02' 
-          ? 'Machine 02 — Centrifugal Water Pump' 
-          : 'Machine 03 — Exhaust Ventilation Blower'
-    });
-  };
-
-  // Simulate ESP32 Live Packet
-  const handleSendTestPacket = async () => {
-    setIsSendingPacket(true);
-    try {
-      await fetch('/api/telemetry', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          machine_id: settings.machineId,
-          vibration_x: (0.15 + Math.random() * 0.05).toFixed(2),
-          vibration_y: (0.12 + Math.random() * 0.04).toFixed(2),
-          vibration_z: (9.81 + Math.random() * 0.05).toFixed(2),
-          vibration_rms: (0.12 + Math.random() * 0.02).toFixed(2),
-          temperature: (42.5 + Math.random() * 0.5).toFixed(1),
-          noise_relative: (68.0 + Math.random() * 3).toFixed(1),
-          hardware_status: { adxl345: true, ds18b20: true, max9814: true },
-        }),
-      });
-      await fetchLatest();
-      await fetchHistory();
-      await fetchAlerts();
-    } catch (err) {
-      console.error('Failed to send packet:', err);
-    } finally {
-      setIsSendingPacket(false);
-    }
-  };
-
-  // Export CSV
-  const handleExportCSV = () => {
-    const headers = [
-      'Timestamp',
-      'Machine ID',
-      'Vibration RMS (m/s²)',
-      'Vibration Resultant (m/s²)',
-      'Temperature (°C)',
-      'Noise Relative (%)',
-      'Health Score',
-      'Condition Status',
-    ];
-
-    const rows = historyData.map((p) => [
-      p.timestamp,
-      p.machineId,
-      p.vibration.rms,
-      p.vibration.resultant,
-      p.temperature.current,
-      p.noise.relativeLevel,
-      p.health.score,
-      p.health.status,
-    ]);
-
-    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', `smartvibe_telemetry_${Date.now()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  const overallStatus: HealthStatus = latestData?.health.status || 'normal';
+  const deviceStatus = latestData?.deviceStatus || 'offline';
+  const lastUpdated = latestData?.timestamp || '';
 
   return (
-    <div className="min-h-screen bg-[#070b14] text-slate-100 flex flex-row font-sans selection:bg-cyan-500/30 selection:text-cyan-200">
-      
-      {/* 1. Left Sidebar Navigation */}
-      <Sidebar
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        mode={settings.mode}
-        onOpenSettings={() => setActiveTab('settings')}
-        mobileOpen={mobileMenuOpen}
-        onCloseMobile={() => setMobileMenuOpen(false)}
+    <div className="bg-industrial-grid relative flex min-h-screen w-full text-slate-100 overflow-x-hidden">
+      {/* Subtle non-distracting ambient radial highlights */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed -top-32 left-1/4 h-96 w-96 rounded-full bg-cyan-500/[0.045] blur-3xl"
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed bottom-0 right-1/4 h-96 w-96 rounded-full bg-teal-500/[0.04] blur-3xl"
       />
 
-      {/* 2. Main Viewport Area */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-y-auto">
-        
-        {/* Top Header */}
+      {/* Sidebar */}
+      <Sidebar
+        activeTab={activeTab}
+        onSelectTab={(tab) => {
+          if (tab === 'reports') {
+            setReportModalOpen(true);
+          } else {
+            setActiveTab(tab);
+          }
+        }}
+        mobileOpen={mobileMenuOpen}
+        onCloseMobile={() => setMobileMenuOpen(false)}
+        mode={settings.mode}
+        deviceStatus={deviceStatus}
+        onSwitchMode={handleSwitchMode}
+      />
+
+      {/* Main Content Shell */}
+      <div className="relative z-10 flex flex-1 flex-col min-w-0">
         <Header
-          currentMachineId={settings.machineId}
+          currentMachineId={currentMachineId}
           onSelectMachine={handleSelectMachine}
-          deviceStatus={latestData?.deviceStatus || 'online'}
-          lastUpdated={latestData?.timestamp || ''}
+          deviceStatus={deviceStatus}
+          lastUpdated={lastUpdated}
           alerts={alerts}
-          onOpenAlerts={() => setActiveTab('dashboard')}
+          onOpenAlerts={() => setAlertsOpen(true)}
           onToggleMobileMenu={() => setMobileMenuOpen(true)}
           mode={settings.mode}
+          isStreaming={isStreaming}
           googleUser={googleUser}
-          onOpenGoogleDrive={() => setActiveTab('google-drive')}
+          onOpenGoogleDrive={() => setActiveTab('drive')}
         />
 
-        {/* Dynamic Page Content */}
-        <main className="flex-1 p-4 sm:p-6 lg:p-7 space-y-6 max-w-[1600px] w-full mx-auto">
-          
-          {/* Loading Skeleton */}
-          {isLoading && (
-            <div className="flex h-64 flex-col items-center justify-center rounded-2xl border border-slate-800 bg-slate-900/40 p-8 text-center">
-              <div className="h-8 w-8 animate-spin rounded-full border-2 border-cyan-500 border-t-transparent mb-3" />
-              <p className="text-sm font-semibold text-slate-200">Initializing SmartVibe Telemetry Engine...</p>
-              <p className="text-xs text-slate-500 mt-1">Connecting to ADXL345, DS18B20, and MAX9814 sensor buffers</p>
-            </div>
-          )}
+        <main className="flex-1 p-4 sm:p-6 lg:p-7 max-w-[1600px] w-full mx-auto">
+          {!latestData ? (
+            /* Industrial Skeleton Loading State */
+            <div className="space-y-5">
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-2">
+                  <div className="sv-skeleton h-7 w-64 rounded-lg" />
+                  <div className="sv-skeleton h-3.5 w-80 rounded-md" />
+                </div>
+                <div className="sv-skeleton h-16 w-56 rounded-xl" />
+              </div>
 
-          {!isLoading && latestData && (
-            <>
-              {/* VIEW 1: DASHBOARD (PRIMARY REFERENCE IMAGE DESIGN) */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <div className="sv-skeleton h-64 rounded-2xl border border-slate-800/70" />
+                <div className="sv-skeleton h-64 rounded-2xl border border-slate-800/70" />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <div className="sv-skeleton h-56 rounded-2xl border border-slate-800/70" />
+                <div className="sv-skeleton h-56 rounded-2xl border border-slate-800/70" />
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+                <div className="sv-skeleton lg:col-span-5 h-60 rounded-2xl border border-slate-800/70" />
+                <div className="sv-skeleton lg:col-span-3 h-60 rounded-2xl border border-slate-800/70" />
+                <div className="sv-skeleton lg:col-span-4 h-60 rounded-2xl border border-slate-800/70" />
+              </div>
+            </div>
+          ) : (
+            <div key={activeTab} className="sv-tab-enter space-y-6">
               {activeTab === 'dashboard' && (
-                <div className="space-y-6">
-                  
-                  {/* Top Section: Machine Health Overview Title & Three Sensor Cards */}
+                <>
                   <SensorCards
                     vibration={latestData.vibration}
-                    temperature={latestData.temperature}
                     noise={latestData.noise}
-                    overallStatus={overallStatus}
+                    overallStatus={latestData.health.status}
+                    historyPoints={historyData}
+                    deviceStatus={deviceStatus}
+                    mode={settings.mode}
+                    isStreaming={isStreaming}
+                    lastUpdated={lastUpdated}
                     onOpenVibrationDetails={() => setActiveTab('live')}
-                    onOpenTemperatureDetails={() => setActiveTab('live')}
                     onOpenNoiseDetails={() => setActiveTab('live')}
                   />
 
-                  {/* Row 2: Three Individual Sensor Trend Charts in a Row */}
                   <IndividualTrendCharts
                     points={historyData}
                     selectedRange={selectedRange}
-                    onRangeChange={handleRangeChange}
+                    onRangeChange={setSelectedRange}
+                    deviceStatus={deviceStatus}
+                    mode={settings.mode}
+                    isStreaming={isStreaming}
+                    lastUpdated={lastUpdated}
                   />
 
-                  {/* Row 3: Combined Sensor View + Recent Readings + AI Machine Health Analysis */}
                   <MiddleRowCards
                     points={historyData}
                     latestHealth={latestData.health}
                     selectedRange={selectedRange}
-                    onRangeChange={handleRangeChange}
+                    onRangeChange={setSelectedRange}
                     onViewAllHistory={() => setActiveTab('history')}
-                    onOpenAiDeepDive={() => setActiveTab('ai-analysis')}
+                    onOpenAiAnalysis={() => setActiveTab('ai')}
+                    deviceStatus={deviceStatus}
+                    mode={settings.mode}
+                    isStreaming={isStreaming}
+                    lastUpdated={lastUpdated}
                   />
 
-                  {/* Row 4: Alerts & Notifications + Quick Actions + Brand Banner */}
                   <BottomRowCards
                     alerts={alerts}
-                    onViewAllAlerts={() => setActiveTab('history')}
-                    onGenerateReport={() => setIsReportOpen(true)}
+                    onViewAllAlerts={() => setAlertsOpen(true)}
+                    onGenerateReport={() => setReportModalOpen(true)}
                     onViewHistory={() => setActiveTab('history')}
-                    onConfigureThresholds={() => setActiveTab('settings')}
-                    onExportCSV={handleExportCSV}
                   />
-
-                </div>
+                </>
               )}
 
-              {/* VIEW 2: LIVE MONITORING */}
               {activeTab === 'live' && (
-                <div className="space-y-6">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h2 className="text-xl font-bold text-white">Live Sensor Telemetry Monitor</h2>
-                      <p className="text-xs text-slate-400">High-resolution sensor stream, multi-axis acceleration, and acoustic wave diagnostics</p>
-                    </div>
-                    <button
-                      onClick={() => setIsStreaming(!isStreaming)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-                        isStreaming ? 'bg-amber-600/80 text-white' : 'bg-emerald-600/80 text-white'
-                      }`}
-                    >
-                      {isStreaming ? 'Pause Stream' : 'Resume Stream'}
-                    </button>
-                  </div>
-
-                  {/* Sensor Cards */}
-                  <SensorCards
-                    vibration={latestData.vibration}
-                    temperature={latestData.temperature}
-                    noise={latestData.noise}
-                    overallStatus={overallStatus}
-                  />
-
-                  {/* Interactive charts */}
-                  <IndividualTrendCharts
-                    points={historyData}
-                    selectedRange={selectedRange}
-                    onRangeChange={handleRangeChange}
-                  />
-
-                  {/* Hardware Integration Section */}
-                  <HardwareGuide
-                    onSendTestPacket={handleSendTestPacket}
-                    isSendingPacket={isSendingPacket}
-                    appUrl={window.location.origin}
-                  />
-                </div>
-              )}
-
-              {/* VIEW 3: MACHINE HISTORY */}
-              {activeTab === 'history' && (
-                <div className="space-y-6">
-                  <div>
-                    <h2 className="text-xl font-bold text-white">Machine Historical Telemetry & Log Audit</h2>
-                    <p className="text-xs text-slate-400">Complete historical record of vibration, temperature, acoustic levels, and health assessments</p>
-                  </div>
-
-                  <HistoryTable points={historyData} />
-                  
-                  <AlertsPanel
-                    alerts={alerts}
-                    onAcknowledge={handleAcknowledgeAlert}
-                    onClearAcknowledged={handleClearAcknowledged}
-                  />
-                </div>
-              )}
-
-              {/* VIEW 4: AI ANALYSIS */}
-              {activeTab === 'ai-analysis' && (
-                <div className="space-y-6">
-                  <div>
-                    <h2 className="text-xl font-bold text-white">AI-Based Machine Health Analysis & Anomaly Detection</h2>
-                    <p className="text-xs text-slate-400">Multi-parameter correlation heuristics, condition scoring, and diagnostic advisories</p>
-                  </div>
-
-                  <AiHealthScorePanel
-                    evaluation={latestData.health}
-                    onTriggerDiagnosis={handleTriggerDiagnosis}
-                    isDiagnosing={isDiagnosing}
-                    detailedReport={aiReportText}
-                  />
-
-                  <MiddleRowCards
-                    points={historyData}
-                    latestHealth={latestData.health}
-                    selectedRange={selectedRange}
-                    onRangeChange={handleRangeChange}
-                    onViewAllHistory={() => setActiveTab('history')}
-                    onOpenAiDeepDive={() => {}}
-                  />
-                </div>
-              )}
-
-              {/* VIEW 5: REPORTS */}
-              {activeTab === 'reports' && (
-                <div className="space-y-6">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h2 className="text-xl font-bold text-white">Machine Health Audit & Condition Reports</h2>
-                      <p className="text-xs text-slate-400">Baseline machinery health assessment, telemetry statistics, and formal print/export</p>
-                    </div>
-                    <button
-                      onClick={() => setIsReportOpen(true)}
-                      className="rounded-lg bg-cyan-600 px-4 py-2 text-xs font-bold text-white hover:bg-cyan-500 shadow-md transition-colors"
-                    >
-                      Open Full PDF Report
-                    </button>
-                  </div>
-
-                  <div className="rounded-2xl border border-slate-800 bg-[#0b1322] p-6 text-center space-y-3">
-                    <p className="text-sm font-semibold text-slate-200">
-                      Generate an authenticated engineering condition report for {settings.machineName}
-                    </p>
-                    <p className="text-xs text-slate-400 max-w-xl mx-auto">
-                      Includes current sensor statistics, operational thresholds, recent anomalies, mathematical health scoring breakdown, and academic project sign-off block.
-                    </p>
-                    <button
-                      onClick={() => setIsReportOpen(true)}
-                      className="mt-2 inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 px-6 py-2.5 text-xs font-bold text-white shadow-lg hover:from-cyan-500 hover:to-blue-500 transition-all cursor-pointer"
-                    >
-                      Generate & Print Machine Health Report
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* VIEW 6: GOOGLE DRIVE CLOUD STORAGE */}
-              {activeTab === 'google-drive' && (
-                <GoogleDriveView
-                  currentUser={googleUser}
-                  accessToken={driveToken}
-                  onAuthSuccess={(user, token) => {
-                    setGoogleUser(user);
-                    setDriveToken(token);
-                  }}
-                  onSignOut={() => {
-                    setGoogleUser(null);
-                    setDriveToken(null);
-                  }}
-                  latestData={latestData}
-                  historyData={historyData}
-                  settings={settings}
+                <TelemetryCharts
+                  points={historyData}
+                  latest={latestData}
+                  selectedRange={selectedRange}
+                  onRangeChange={setSelectedRange}
+                  isStreaming={isStreaming}
+                  onToggleStreaming={() => setIsStreaming((s) => !s)}
+                  deviceStatus={deviceStatus}
+                  mode={settings.mode}
+                  lastUpdated={lastUpdated}
                 />
               )}
 
-              {/* VIEW 7: SETTINGS */}
-              {activeTab === 'settings' && (
-                <div className="space-y-6">
-                  <SettingsModal
-                    settings={settings}
-                    onSaveSettings={handleSaveSettings}
-                    hardwareStatus={latestData.hardware}
-                  />
+              {activeTab === 'history' && <HistoryTable points={historyData} />}
 
-                  <HardwareGuide
-                    onSendTestPacket={handleSendTestPacket}
-                    isSendingPacket={isSendingPacket}
-                    appUrl={window.location.origin}
-                  />
-                </div>
+              {activeTab === 'ai' && (
+                <AiHealthScorePanel
+                  evaluation={latestData.health}
+                  detailedReport={aiReport}
+                  generatedBy={aiGeneratedBy}
+                  isDiagnosing={isDiagnosing}
+                  onRunDiagnosis={handleRunAiDiagnosis}
+                />
               )}
-            </>
+
+              {activeTab === 'drive' && (
+                <GoogleDriveView
+                  googleUser={googleUser}
+                  onUserChange={setGoogleUser}
+                  latestData={latestData}
+                />
+              )}
+
+              {activeTab === 'hardware' && <HardwareGuide onPacketSent={loadAll} />}
+
+              {activeTab === 'settings' && (
+                <SettingsModal settings={settings} onSave={handleSaveSettings} />
+              )}
+            </div>
           )}
-
         </main>
+      </div>
 
-        {/* Global Modal: Machine Health Report */}
+      {/* Drawers & Modals */}
+      <AlertsPanel
+        isOpen={alertsOpen}
+        onClose={() => setAlertsOpen(false)}
+        alerts={alerts}
+        onAcknowledge={handleAcknowledgeAlert}
+        onClearAll={handleClearAlerts}
+      />
+
+      {latestData && (
         <HealthReportModal
-          isOpen={isReportOpen}
-          onClose={() => setIsReportOpen(false)}
+          isOpen={reportModalOpen}
+          onClose={() => setReportModalOpen(false)}
           latest={latestData}
           history={historyData}
           alerts={alerts}
-          settings={settings}
-          onOpenGoogleDrive={() => setActiveTab('google-drive')}
+          aiSummary={aiReport}
         />
-
-      </div>
-
+      )}
     </div>
   );
 }
+
+export default App;

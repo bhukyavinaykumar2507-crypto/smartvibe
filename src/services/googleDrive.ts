@@ -1,218 +1,237 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
-import { 
-  getAuth, 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  onAuthStateChanged, 
-  User,
-  signOut 
+import { initializeApp, getApps, type FirebaseApp } from 'firebase/app';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
+  onAuthStateChanged,
+  type Auth,
+  type User,
 } from 'firebase/auth';
-import firebaseConfig from '../../firebase-applet-config.json';
-
-// Initialize Firebase App
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-export const auth = getAuth(app);
-
-export const SCOPES = [
-  'https://www.googleapis.com/auth/drive',
-  'https://www.googleapis.com/auth/drive.activity',
-  'https://www.googleapis.com/auth/drive.activity.readonly',
-  'https://www.googleapis.com/auth/drive.appdata',
-  'https://www.googleapis.com/auth/drive.apps.readonly',
-  'https://www.googleapis.com/auth/drive.file',
-  'https://www.googleapis.com/auth/drive.install',
-  'https://www.googleapis.com/auth/drive.meet.readonly',
-  'https://www.googleapis.com/auth/drive.metadata',
-  'https://www.googleapis.com/auth/drive.metadata.readonly',
-  'https://www.googleapis.com/auth/drive.photos.readonly',
-  'https://www.googleapis.com/auth/drive.readonly',
-  'https://www.googleapis.com/auth/drive.scripts',
-];
-
-const provider = new GoogleAuthProvider();
-SCOPES.forEach((scope) => provider.addScope(scope));
-
-// In-memory token cache
-let isSigningIn = false;
-let cachedAccessToken: string | null = null;
-
-export const initAuth = (
-  onAuthSuccess?: (user: User, token: string) => void,
-  onAuthFailure?: () => void
-) => {
-  return onAuthStateChanged(auth, async (user: User | null) => {
-    if (user) {
-      if (cachedAccessToken) {
-        if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
-      } else if (!isSigningIn) {
-        cachedAccessToken = null;
-        if (onAuthFailure) onAuthFailure();
-      }
-    } else {
-      cachedAccessToken = null;
-      if (onAuthFailure) onAuthFailure();
-    }
-  });
-};
-
-export const googleSignIn = async (): Promise<{ user: User; accessToken: string } | null> => {
-  try {
-    isSigningIn = true;
-    const result = await signInWithPopup(auth, provider);
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    if (!credential?.accessToken) {
-      throw new Error('Failed to get access token from Google Auth');
-    }
-
-    cachedAccessToken = credential.accessToken;
-    return { user: result.user, accessToken: cachedAccessToken };
-  } catch (error: any) {
-    console.error('Google Sign In error:', error);
-    throw error;
-  } finally {
-    isSigningIn = false;
-  }
-};
-
-export const getAccessToken = async (): Promise<string | null> => {
-  return cachedAccessToken;
-};
-
-export const logoutGoogle = async () => {
-  await signOut(auth);
-  cachedAccessToken = null;
-};
 
 export interface DriveFile {
   id: string;
   name: string;
   mimeType: string;
-  createdTime?: string;
   modifiedTime?: string;
   size?: string;
   webViewLink?: string;
-  iconLink?: string;
 }
 
-// Ensure or get SmartVibe reports folder
-export const getOrCreateReportsFolder = async (accessToken: string): Promise<string> => {
-  const query = encodeURIComponent("name = 'SmartVibe_Machine_Reports' and mimeType = 'application/vnd.google-apps.folder' and trashed = false");
-  const searchRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+const FOLDER_NAME = 'SmartVibe_Machine_Reports';
+const TOKEN_STORAGE_KEY = 'smartvibe_gdrive_token';
 
-  if (searchRes.ok) {
-    const searchData = await searchRes.json();
-    if (searchData.files && searchData.files.length > 0) {
-      return searchData.files[0].id;
-    }
+const DRIVE_SCOPES = [
+  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/drive.metadata.readonly',
+];
+
+let firebaseApp: FirebaseApp | null = null;
+let firebaseAuth: Auth | null = null;
+
+function getFirebaseConfig(): Record<string, string> | null {
+  const apiKey = import.meta.env.VITE_FIREBASE_API_KEY;
+  const authDomain = import.meta.env.VITE_FIREBASE_AUTH_DOMAIN;
+  const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID;
+  const appId = import.meta.env.VITE_FIREBASE_APP_ID;
+
+  if (!apiKey || !projectId) {
+    return null;
   }
 
-  // Create folder if not found
+  return {
+    apiKey,
+    authDomain: authDomain || `${projectId}.firebaseapp.com`,
+    projectId,
+    appId: appId || '',
+  };
+}
+
+function ensureFirebaseAuth(): Auth | null {
+  if (firebaseAuth) return firebaseAuth;
+  const cfg = getFirebaseConfig();
+  if (!cfg) return null;
+
+  try {
+    firebaseApp = getApps().length ? getApps()[0] : initializeApp(cfg);
+    firebaseAuth = getAuth(firebaseApp);
+    return firebaseAuth;
+  } catch {
+    return null;
+  }
+}
+
+export function getAccessToken(): string | null {
+  try {
+    return sessionStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function setAccessToken(token: string | null) {
+  try {
+    if (token) sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
+    else sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    // Ignore storage restriction errors
+  }
+}
+
+export function initAuth(callback: (user: User | null) => void): () => void {
+  const auth = ensureFirebaseAuth();
+  if (!auth) {
+    callback(null);
+    return () => {};
+  }
+  return onAuthStateChanged(auth, (user) => {
+    callback(user);
+  });
+}
+
+export async function googleSignIn(): Promise<{ user: User; token: string }> {
+  const auth = ensureFirebaseAuth();
+  if (!auth) {
+    throw new Error(
+      'Google Drive sign-in is not configured in this environment. Set VITE_FIREBASE_* variables or download reports locally.'
+    );
+  }
+
+  const provider = new GoogleAuthProvider();
+  for (const scope of DRIVE_SCOPES) {
+    provider.addScope(scope);
+  }
+
+  const result = await signInWithPopup(auth, provider);
+  const credential = GoogleAuthProvider.credentialFromResult(result);
+  const token = credential?.accessToken;
+  if (!token) {
+    throw new Error('Google Drive OAuth access token was not granted.');
+  }
+  setAccessToken(token);
+  return { user: result.user, token };
+}
+
+export async function logoutGoogle(): Promise<void> {
+  setAccessToken(null);
+  const auth = ensureFirebaseAuth();
+  if (auth) {
+    await signOut(auth);
+  }
+}
+
+async function getOrCreateFolderId(token: string): Promise<string> {
+  const query = encodeURIComponent(
+    `name='${FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`
+  );
+  const searchRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    }
+  );
+  if (!searchRes.ok) {
+    throw new Error(`Google Drive search failed (${searchRes.status})`);
+  }
+  const searchJson = await searchRes.json();
+  if (searchJson.files && searchJson.files.length > 0) {
+    return searchJson.files[0].id;
+  }
+
   const createRes = await fetch('https://www.googleapis.com/drive/v3/files', {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${accessToken}`,
+      Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      name: 'SmartVibe_Machine_Reports',
+      name: FOLDER_NAME,
       mimeType: 'application/vnd.google-apps.folder',
-      description: 'Industrial IoT Condition Monitoring and Telemetry Reports for SmartVibe',
     }),
   });
 
   if (!createRes.ok) {
-    throw new Error('Failed to create SmartVibe reports folder on Google Drive');
+    throw new Error(`Failed to create Drive folder (${createRes.status})`);
+  }
+  const created = await createRes.json();
+  return created.id;
+}
+
+export async function listSmartVibeFiles(): Promise<DriveFile[]> {
+  const token = getAccessToken();
+  if (!token) return [];
+
+  const folderId = await getOrCreateFolderId(token);
+  const q = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime desc&fields=files(id,name,mimeType,modifiedTime,size,webViewLink)`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+    }
+  );
+  if (!res.ok) {
+    throw new Error(`Unable to list Drive reports (${res.status})`);
+  }
+  const data = await res.json();
+  return data.files || [];
+}
+
+export async function uploadReportToDrive(
+  fileName: string,
+  content: string,
+  mimeType = 'text/html'
+): Promise<DriveFile> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error('Please sign in with Google Drive before uploading.');
   }
 
-  const folderData = await createRes.json();
-  return folderData.id;
-};
-
-// Upload JSON or text report to Google Drive
-export const uploadReportToDrive = async (
-  filename: string,
-  content: string,
-  mimeType = 'application/json'
-): Promise<DriveFile> => {
-  const token = await getAccessToken();
-  if (!token) throw new Error('Not authenticated with Google Drive');
-
-  const folderId = await getOrCreateReportsFolder(token);
-
+  const folderId = await getOrCreateFolderId(token);
   const metadata = {
-    name: filename,
+    name: fileName,
     parents: [folderId],
-    description: 'SmartVibe Machine Health Audit Report',
+    mimeType,
   };
 
-  const boundary = '-------314159265358979323846';
-  const delimiter = `\r\n--${boundary}\r\n`;
-  const closeDelimiter = `\r\n--${boundary}--`;
-
-  const multipartRequestBody =
-    delimiter +
-    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
-    JSON.stringify(metadata) +
-    delimiter +
+  const boundary = '-------smartvibe_multipart_boundary';
+  const body =
+    `--${boundary}\r\n` +
+    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+    `${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\n` +
     `Content-Type: ${mimeType}\r\n\r\n` +
-    content +
-    closeDelimiter;
+    `${content}\r\n` +
+    `--${boundary}--`;
 
-  const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,webViewLink,createdTime,size', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': `multipart/related; boundary=${boundary}`,
-    },
-    body: multipartRequestBody,
-  });
+  const res = await fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,modifiedTime,size,webViewLink',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': `multipart/related; boundary=${boundary}`,
+      },
+      body,
+    }
+  );
 
   if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Drive Upload failed: ${errText}`);
+    throw new Error(`Drive upload failed (${res.status})`);
   }
 
   return await res.json();
-};
+}
 
-// List files in SmartVibe folder or all SmartVibe files
-export const listSmartVibeFiles = async (): Promise<DriveFile[]> => {
-  const token = await getAccessToken();
-  if (!token) return [];
-
-  try {
-    const query = encodeURIComponent("trashed = false and (name contains 'SmartVibe' or name contains 'telemetry')");
-    const res = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=${query}&orderBy=modifiedTime desc&pageSize=30&fields=files(id,name,mimeType,createdTime,modifiedTime,size,webViewLink,iconLink)`,
-      {
-        headers: { Authorization: `Bearer ${token}` },
-      }
-    );
-
-    if (!res.ok) {
-      console.warn('Failed to list files from Drive:', await res.text());
-      return [];
-    }
-
-    const data = await res.json();
-    return data.files || [];
-  } catch (err) {
-    console.error('Error listing files from Google Drive:', err);
-    return [];
+export async function deleteFileFromDrive(fileId: string): Promise<void> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error('Google Drive session expired.');
   }
-};
-
-// Delete a file from Google Drive (Requires explicit confirmation beforehand)
-export const deleteFileFromDrive = async (fileId: string): Promise<boolean> => {
-  const token = await getAccessToken();
-  if (!token) throw new Error('Not authenticated');
-
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${token}` },
   });
-
-  return res.ok;
-};
+  if (!res.ok) {
+    throw new Error(`Delete failed (${res.status})`);
+  }
+}

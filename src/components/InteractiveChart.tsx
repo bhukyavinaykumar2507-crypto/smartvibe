@@ -1,273 +1,300 @@
 import React, { useState } from 'react';
-
-export interface DataSeries {
-  name: string;
-  color: string;
-  unit: string;
-  values: number[];
-}
+import type { TelemetryPoint } from '../types/telemetry';
+import { AnimatedNumber } from './AnimatedNumber';
 
 interface InteractiveChartProps {
-  title: string;
-  subtitle?: string;
-  timestamps: string[];
-  series: DataSeries[];
-  thresholdWarning?: number;
-  thresholdCritical?: number;
-  height?: number;
-  yMin?: number;
-  yMax?: number;
+  points: TelemetryPoint[];
+  selectedRange: '15m' | '1h' | '24h' | '7d';
+  onRangeChange: (range: '15m' | '1h' | '24h' | '7d') => void;
+  focusSensor?: 'all' | 'vibration' | 'noise';
+  deviceStatus?: 'online' | 'offline';
+  mode?: 'demo' | 'live';
+  isStreaming?: boolean;
+  lastUpdated?: string;
 }
 
 export const InteractiveChart: React.FC<InteractiveChartProps> = ({
-  title,
-  subtitle,
-  timestamps,
-  series,
-  thresholdWarning,
-  thresholdCritical,
-  height = 220,
-  yMin,
-  yMax,
+  points,
+  selectedRange,
+  onRangeChange,
+  focusSensor = 'all',
+  deviceStatus = 'offline',
+  mode = 'demo',
+  isStreaming = true,
+  lastUpdated = '',
 }) => {
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
-  if (!timestamps.length || !series.length || !series[0].values.length) {
-    return (
-      <div className="flex h-[220px] flex-col items-center justify-center rounded-xl border border-slate-800 bg-slate-900/50 p-6 text-center text-slate-400">
-        <p className="text-sm">No telemetry points recorded for this window</p>
-      </div>
-    );
-  }
+  const isStale =
+    mode === 'live' &&
+    (!lastUpdated ||
+      Date.now() - new Date(lastUpdated).getTime() > 15000 ||
+      !isStreaming);
+  const isLiveFresh =
+    mode === 'live' && deviceStatus === 'online' && !isStale && isStreaming;
 
-  // Calculate bounds
-  const allValues = series.flatMap(s => s.values).filter(v => typeof v === 'number' && !isNaN(v));
-  if (thresholdWarning !== undefined) allValues.push(thresholdWarning);
-  if (thresholdCritical !== undefined) allValues.push(thresholdCritical);
+  const width = 760;
+  const height = 270;
+  const padLeft = 44;
+  const padRight = 18;
+  const padTop = 20;
+  const padBottom = 32;
+  const chartW = width - padLeft - padRight;
+  const chartH = height - padTop - padBottom;
 
-  const rawMin = yMin !== undefined ? yMin : Math.min(...allValues, 0);
-  const rawMax = yMax !== undefined ? yMax : Math.max(...allValues, 10);
-  const padding = (rawMax - rawMin) * 0.12 || 1;
-  const minVal = yMin !== undefined ? yMin : Math.max(0, Math.floor(rawMin - padding));
-  const maxVal = yMax !== undefined ? yMax : Math.ceil(rawMax + padding);
-  const range = maxVal - minVal || 1;
+  const n = Math.max(1, points.length);
+  const getX = (idx: number) => padLeft + (idx / Math.max(1, n - 1)) * chartW;
+  const getYNorm = (pct: number) =>
+    padTop + chartH - (Math.min(100, Math.max(0, pct)) / 100) * chartH;
 
-  const width = 800; // SVG viewBox coordinate width
-  const svgHeight = height;
-  const padLeft = 46;
-  const padRight = 16;
-  const padTop = 18;
-  const padBottom = 28;
+  // Scale vibration (0 - 1.5 m/s²) and noise (0 - 100%) to 0-100 unified canvas
+  const vibNorm = points.map((p) => Math.min(100, (p.vibration.resultant / 1.5) * 100));
+  const noiseNorm = points.map((p) => Math.min(100, Math.max(0, p.noise.relativeLevel)));
 
-  const chartWidth = width - padLeft - padRight;
-  const chartHeight = svgHeight - padTop - padBottom;
+  const buildPolyline = (arr: number[]) =>
+    arr.map((v, i) => `${getX(i).toFixed(1)},${getYNorm(v).toFixed(1)}`).join(' ');
 
-  const n = timestamps.length;
-  const getX = (index: number) => padLeft + (index / Math.max(1, n - 1)) * chartWidth;
-  const getY = (val: number) => padTop + chartHeight - ((val - minVal) / range) * chartHeight;
+  const activeIdx =
+    hoverIdx !== null && hoverIdx >= 0 && hoverIdx < points.length
+      ? hoverIdx
+      : Math.max(0, points.length - 1);
+  const activePoint = points[activeIdx];
 
-  // Grid tick lines
-  const tickCount = 4;
-  const ticks = Array.from({ length: tickCount + 1 }).map((_, i) => {
-    const val = minVal + (range * i) / tickCount;
-    return {
-      value: Number(val.toFixed(1)),
-      y: getY(val),
-    };
-  });
-
-  const activeIdx = hoverIndex !== null && hoverIndex >= 0 && hoverIndex < n ? hoverIndex : n - 1;
-  const activeTime = timestamps[activeIdx] ? new Date(timestamps[activeIdx]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+  const handleScrub = (clientX: number, rect: DOMRect) => {
+    if (points.length < 2) return;
+    const relX = ((clientX - rect.left) / rect.width) * width;
+    const clampedX = Math.max(padLeft, Math.min(width - padRight, relX));
+    const ratio = (clampedX - padLeft) / chartW;
+    setHoverIdx(Math.round(ratio * (points.length - 1)));
+  };
 
   return (
-    <div className="relative rounded-xl border border-slate-800/80 bg-slate-900/40 p-4 backdrop-blur-md transition-all">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h4 className="text-sm font-semibold tracking-tight text-slate-100">{title}</h4>
-          {subtitle && <p className="text-xs text-slate-400">{subtitle}</p>}
+    <div className="sv-card sv-card-neutral rounded-2xl border border-slate-800/80 bg-[#0b1322]/95 p-5 shadow-lg shadow-black/30 backdrop-blur-md">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div className="flex items-center gap-2.5">
+          <h3 className="text-sm font-bold text-white">
+            {focusSensor === 'vibration'
+              ? 'ADXL345 Vibration Waveform Telemetry'
+              : focusSensor === 'noise'
+                ? 'MAX9814 Acoustic Envelope Telemetry'
+                : 'Combined Sensor Stream (ADXL345 + MAX9814)'}
+          </h3>
+          {isLiveFresh ? (
+            <span className="inline-flex items-center gap-1.5 rounded bg-emerald-950/60 border border-emerald-500/40 px-2 py-0.5 text-[10px] font-mono text-emerald-300">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="sv-live-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              </span>
+              LIVE
+            </span>
+          ) : mode === 'live' && isStale ? (
+            <span className="rounded bg-amber-950/60 border border-amber-500/40 px-2 py-0.5 text-[10px] font-mono text-amber-300">
+              STALE
+            </span>
+          ) : mode === 'live' ? (
+            <span className="rounded bg-rose-950/60 border border-rose-500/40 px-2 py-0.5 text-[10px] font-mono text-rose-300">
+              OFFLINE
+            </span>
+          ) : null}
         </div>
 
-        {/* Legend */}
-        <div className="flex flex-wrap items-center gap-3 text-xs">
-          {series.map(s => (
-            <div key={s.name} className="flex items-center gap-1.5">
-              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: s.color }} />
-              <span className="text-slate-300">{s.name}</span>
-              <span className="font-mono text-slate-400 tabular-nums">
-                {s.values[activeIdx] !== undefined ? `${s.values[activeIdx]} ${s.unit}` : '—'}
-              </span>
-            </div>
+        <div className="flex items-center gap-1 rounded-lg bg-slate-950 p-0.5 border border-slate-800">
+          {(['15m', '1h', '24h', '7d'] as const).map((r) => (
+            <button
+              key={r}
+              onClick={() => onRangeChange(r)}
+              className={`rounded px-2 py-1 text-[11px] font-mono transition-colors ${
+                selectedRange === r
+                  ? 'bg-cyan-600 text-white font-semibold'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {r}
+            </button>
           ))}
-          {thresholdWarning !== undefined && (
-            <div className="flex items-center gap-1.5">
-              <span className="h-0.5 w-3 border-b border-dashed border-amber-400" />
-              <span className="text-amber-400/90 text-[11px]">Warn ({thresholdWarning})</span>
-            </div>
-          )}
-          {thresholdCritical !== undefined && (
-            <div className="flex items-center gap-1.5">
-              <span className="h-0.5 w-3 border-b border-dashed border-rose-500" />
-              <span className="text-rose-400/90 text-[11px]">Crit ({thresholdCritical})</span>
-            </div>
-          )}
         </div>
       </div>
 
-      <div className="relative w-full overflow-hidden">
+      {/* Chart Canvas */}
+      {points.length < 2 ? (
+        <div className="flex h-[240px] items-center justify-center rounded-xl border border-dashed border-slate-800 bg-slate-950/40 text-xs font-mono text-slate-500">
+          {mode === 'live' && deviceStatus === 'offline'
+            ? 'ESP32 offline — waiting for incoming ADXL345 & MAX9814 frames'
+            : 'Collecting real-time sensor frames...'}
+        </div>
+      ) : (
         <svg
-          viewBox={`0 0 ${width} ${svgHeight}`}
-          className="w-full select-none overflow-visible"
-          onMouseMove={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            const relX = ((e.clientX - rect.left) / rect.width) * width;
-            const boundedX = Math.max(padLeft, Math.min(width - padRight, relX));
-            const ratio = (boundedX - padLeft) / chartWidth;
-            const idx = Math.round(ratio * (n - 1));
-            setHoverIndex(idx);
+          viewBox={`0 0 ${width} ${height}`}
+          className="w-full overflow-visible select-none touch-pan-y"
+          onMouseMove={(e) => handleScrub(e.clientX, e.currentTarget.getBoundingClientRect())}
+          onTouchMove={(e) => {
+            if (e.touches[0]) {
+              handleScrub(e.touches[0].clientX, e.currentTarget.getBoundingClientRect());
+            }
           }}
-          onMouseLeave={() => setHoverIndex(null)}
+          onMouseLeave={() => setHoverIdx(null)}
+          onTouchEnd={() => setHoverIdx(null)}
         >
-          <defs>
-            {series.map((s, idx) => (
-              <linearGradient key={`grad-${idx}`} id={`gradient-${s.name.replace(/\s+/g, '-')}`} x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={s.color} stopOpacity="0.25" />
-                <stop offset="100%" stopColor={s.color} stopOpacity="0.0" />
-              </linearGradient>
-            ))}
-          </defs>
-
-          {/* Grid lines */}
-          {ticks.map((t, idx) => (
-            <g key={idx}>
-              <line
-                x1={padLeft}
-                y1={t.y}
-                x2={width - padRight}
-                y2={t.y}
-                stroke="#1e293b"
-                strokeWidth="1"
-                strokeDasharray="3 3"
-              />
-              <text
-                x={padLeft - 8}
-                y={t.y + 3}
-                textAnchor="end"
-                className="fill-slate-500 text-[10px] font-mono tabular-nums"
-              >
-                {t.value}
-              </text>
-            </g>
-          ))}
-
-          {/* Warning threshold line */}
-          {thresholdWarning !== undefined && thresholdWarning <= maxVal && thresholdWarning >= minVal && (
-            <line
-              x1={padLeft}
-              y1={getY(thresholdWarning)}
-              x2={width - padRight}
-              y2={getY(thresholdWarning)}
-              stroke="#f59e0b"
-              strokeWidth="1.2"
-              strokeDasharray="4 4"
-              opacity="0.85"
-            />
-          )}
-
-          {/* Critical threshold line */}
-          {thresholdCritical !== undefined && thresholdCritical <= maxVal && thresholdCritical >= minVal && (
-            <line
-              x1={padLeft}
-              y1={getY(thresholdCritical)}
-              x2={width - padRight}
-              y2={getY(thresholdCritical)}
-              stroke="#f43f5e"
-              strokeWidth="1.2"
-              strokeDasharray="4 4"
-              opacity="0.9"
-            />
-          )}
-
-          {/* Series Area and Line */}
-          {series.map((s) => {
-            const points = s.values.map((v, i) => `${getX(i)},${getY(v)}`);
-            const pathD = `M ${points.join(' L ')}`;
-            const firstX = getX(0);
-            const lastX = getX(s.values.length - 1);
-            const bottomY = getY(minVal);
-            const areaD = `M ${firstX},${bottomY} L ${points.join(' L ')} L ${lastX},${bottomY} Z`;
-
+          {[0, 25, 50, 75, 100].map((tick) => {
+            const y = getYNorm(tick);
             return (
-              <g key={s.name}>
-                <path
-                  d={areaD}
-                  fill={`url(#gradient-${s.name.replace(/\s+/g, '-')})`}
+              <g key={tick}>
+                <line
+                  x1={padLeft}
+                  y1={y}
+                  x2={width - padRight}
+                  y2={y}
+                  stroke="#1e293b"
+                  strokeWidth="0.9"
+                  strokeDasharray="3 3"
                 />
-                <path
-                  d={pathD}
-                  fill="none"
-                  stroke={s.color}
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
+                <text
+                  x={padLeft - 8}
+                  y={y + 3}
+                  textAnchor="end"
+                  className="fill-slate-400 text-[10px] font-mono tabular-nums"
+                >
+                  {tick}%
+                </text>
               </g>
             );
           })}
 
-          {/* Interactive Crosshair & Tooltip */}
-          {hoverIndex !== null && (
+          {(focusSensor === 'all' || focusSensor === 'vibration') && (
+            <polyline
+              fill="none"
+              stroke="#06b6d4"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              points={buildPolyline(vibNorm)}
+              className="sv-svg-smooth"
+            />
+          )}
+
+          {(focusSensor === 'all' || focusSensor === 'noise') && (
+            <polyline
+              fill="none"
+              stroke="#a855f7"
+              strokeWidth="2.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              points={buildPolyline(noiseNorm)}
+              className="sv-svg-smooth"
+            />
+          )}
+
+          {/* Terminal point markers */}
+          {points.length > 0 && (
+            <g className="sv-svg-smooth">
+              {(focusSensor === 'all' || focusSensor === 'vibration') && (
+                <circle
+                  cx={getX(points.length - 1)}
+                  cy={getYNorm(vibNorm[vibNorm.length - 1])}
+                  r="4"
+                  fill="#06b6d4"
+                  stroke="#0b1322"
+                  strokeWidth="1.5"
+                />
+              )}
+              {(focusSensor === 'all' || focusSensor === 'noise') && (
+                <circle
+                  cx={getX(points.length - 1)}
+                  cy={getYNorm(noiseNorm[noiseNorm.length - 1])}
+                  r="4"
+                  fill="#a855f7"
+                  stroke="#0b1322"
+                  strokeWidth="1.5"
+                />
+              )}
+            </g>
+          )}
+
+          {/* Hover Crosshair */}
+          {hoverIdx !== null && activePoint && (
             <g>
               <line
                 x1={getX(activeIdx)}
                 y1={padTop}
                 x2={getX(activeIdx)}
-                y2={padTop + chartHeight}
+                y2={padTop + chartH}
                 stroke="#64748b"
                 strokeWidth="1"
-                strokeDasharray="2 2"
+                strokeDasharray="3 3"
               />
-              {series.map((s) => {
-                const val = s.values[activeIdx];
-                if (val === undefined) return null;
-                return (
-                  <circle
-                    key={s.name}
-                    cx={getX(activeIdx)}
-                    cy={getY(val)}
-                    r="4"
-                    fill={s.color}
-                    stroke="#0b1120"
-                    strokeWidth="2"
-                  />
-                );
-              })}
+              {(focusSensor === 'all' || focusSensor === 'vibration') && (
+                <circle
+                  cx={getX(activeIdx)}
+                  cy={getYNorm(vibNorm[activeIdx])}
+                  r="4.5"
+                  fill="#06b6d4"
+                  stroke="#0b1322"
+                  strokeWidth="2"
+                />
+              )}
+              {(focusSensor === 'all' || focusSensor === 'noise') && (
+                <circle
+                  cx={getX(activeIdx)}
+                  cy={getYNorm(noiseNorm[activeIdx])}
+                  r="4.5"
+                  fill="#a855f7"
+                  stroke="#0b1322"
+                  strokeWidth="2"
+                />
+              )}
             </g>
           )}
 
-          {/* X-axis time labels */}
-          <text
-            x={padLeft}
-            y={svgHeight - 8}
-            className="fill-slate-500 text-[10px] font-mono"
-            textAnchor="start"
-          >
-            {timestamps[0] ? new Date(timestamps[0]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
-          </text>
-          <text
-            x={width - padRight}
-            y={svgHeight - 8}
-            className="fill-slate-500 text-[10px] font-mono"
-            textAnchor="end"
-          >
-            {timestamps[n - 1] ? new Date(timestamps[n - 1]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
-          </text>
+          {[0, Math.floor(n * 0.25), Math.floor(n * 0.5), Math.floor(n * 0.75), n - 1].map((idx) => {
+            const p = points[idx];
+            if (!p) return null;
+            return (
+              <text
+                key={idx}
+                x={getX(idx)}
+                y={height - 8}
+                textAnchor="middle"
+                className="fill-slate-400 text-[10px] font-mono tabular-nums"
+              >
+                {new Date(p.timestamp).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                })}
+              </text>
+            );
+          })}
         </svg>
+      )}
 
-        {hoverIndex !== null && (
-          <div className="pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 rounded bg-slate-950/90 px-2 py-0.5 text-[11px] font-mono text-cyan-400 shadow-md border border-slate-700">
-            {activeTime}
-          </div>
-        )}
+      {/* Readout Strip */}
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-slate-800/80 pt-3 text-xs font-mono">
+        <div className="flex flex-wrap items-center gap-4">
+          {(focusSensor === 'all' || focusSensor === 'vibration') && (
+            <span className="flex items-center gap-2 text-slate-300">
+              <span className="h-2 w-2 rounded-full bg-cyan-400" />
+              Vibration:
+              <strong className="text-cyan-300 tabular-nums">
+                {activePoint ? <AnimatedNumber value={activePoint.vibration.resultant} decimals={2} duration={220} /> : '0.00'} m/s²
+              </strong>
+            </span>
+          )}
+          {(focusSensor === 'all' || focusSensor === 'noise') && (
+            <span className="flex items-center gap-2 text-slate-300">
+              <span className="h-2 w-2 rounded-full bg-purple-400" />
+              Noise:
+              <strong className="text-purple-300 tabular-nums">
+                {activePoint ? <AnimatedNumber value={activePoint.noise.relativeLevel} decimals={0} duration={220} /> : '0'}%
+              </strong>
+            </span>
+          )}
+        </div>
+        <span className="text-slate-500">
+          {hoverIdx !== null && activePoint
+            ? new Date(activePoint.timestamp).toLocaleTimeString()
+            : 'Scrub chart to inspect past packets'}
+        </span>
       </div>
     </div>
   );

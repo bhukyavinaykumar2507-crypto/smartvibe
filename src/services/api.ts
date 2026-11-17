@@ -1,368 +1,265 @@
 import type {
   TelemetryPoint,
-  MachineSettings,
   AlertItem,
+  MachineSettings,
+  AiDiagnosisResponse,
   HealthStatus,
-  MachineHealthEvaluation
+  NoisePatternState,
 } from '../types/telemetry';
 
-const STORAGE_KEY_API_URL = 'smartvibe_api_url';
+const API_BASE =
+  typeof window !== 'undefined' &&
+  (window.location.protocol === 'capacitor:' ||
+    window.location.hostname === 'localhost' && window.location.port === '')
+    ? import.meta.env.VITE_API_URL || ''
+    : '';
 
-export function getCustomApiUrl(): string {
-  try {
-    return localStorage.getItem(STORAGE_KEY_API_URL) || '';
-  } catch {
-    return '';
-  }
+function buildUrl(path: string): string {
+  return `${API_BASE}${path}`;
 }
 
-export function setCustomApiUrl(url: string) {
-  try {
-    const clean = url.trim().replace(/\/+$/, '');
-    if (clean) {
-      localStorage.setItem(STORAGE_KEY_API_URL, clean);
-    } else {
-      localStorage.removeItem(STORAGE_KEY_API_URL);
-    }
-  } catch {
-    // ignore
-  }
-}
-
-export function getApiBaseUrl(): string {
-  const custom = getCustomApiUrl();
-  if (custom) return custom;
-  // If in standard web browser, use relative path to Express
-  return '';
-}
-
-// Client-side fallback simulator for standalone offline Android APK
-let localSimulationStep = 0;
+// Local offline simulation fallback for standalone Capacitor APK when backend is unreachable
 let localSettings: MachineSettings = {
   machineId: 'machine_01',
-  machineName: 'Machine 01 — CNC Spindle Drive',
-  machineType: 'Three-Phase AC Induction Motor & Milling Spindle',
-  location: 'Lab Test Bay 3 / Bench A',
+  machineName: 'Machine 01',
   mode: 'demo',
-  demoScenario: 'normal',
-  tempWarningThreshold: 55,
-  tempCriticalThreshold: 75,
-  vibrationBaseline: 1.2,
-  vibrationWarningThreshold: 2.8,
-  vibrationCriticalThreshold: 4.5,
-  noiseWarningThreshold: 68,
-  noiseCriticalThreshold: 85,
+  vibWarningThreshold: 0.45,
+  vibAnomalyThreshold: 0.85,
+  noiseWarningThreshold: 72,
+  noiseAnomalyThreshold: 88,
+  esp32TimeoutSeconds: 15,
 };
 
-let localAlerts: AlertItem[] = [];
-let localHistory: TelemetryPoint[] = [];
+let localStep = 0;
+const localHistory: TelemetryPoint[] = [];
+const localAlerts: AlertItem[] = [];
 
-function generateLocalPoint(timestamp?: string): TelemetryPoint {
-  localSimulationStep += 0.2;
-  const time = timestamp || new Date().toISOString();
-
-  let x = 0.4 + Math.sin(localSimulationStep * 0.7) * 0.2;
-  let y = 0.3 + Math.cos(localSimulationStep * 0.5) * 0.15;
-  let z = 9.81 + Math.sin(localSimulationStep * 1.2) * 0.25;
-  let temp = 39.2 + Math.sin(localSimulationStep * 0.1) * 2.5;
-  let noiseRel = 35 + Math.sin(localSimulationStep * 0.8) * 8;
-  let pattern: 'steady' | 'periodic_pulses' | 'erratic_bursts' = 'steady';
-
-  switch (localSettings.demoScenario) {
-    case 'bearing_wear':
-      x += (Math.random() > 0.7 ? 2.5 : 1.2) + Math.sin(localSimulationStep * 2.8) * 0.9;
-      y += 1.4 + Math.cos(localSimulationStep * 2.1) * 0.7;
-      temp += 8.5 + Math.sin(localSimulationStep * 0.15) * 3;
-      noiseRel = 69 + Math.random() * 12;
-      pattern = 'periodic_pulses';
-      break;
-    case 'overheating':
-      temp = 68.4 + Math.sin(localSimulationStep * 0.2) * 6;
-      x += 0.6;
-      y += 0.5;
-      noiseRel = 44 + Math.random() * 6;
-      pattern = 'steady';
-      break;
-    case 'unbalance':
-      x += Math.sin(localSimulationStep * 1.8) * 3.8;
-      y += Math.cos(localSimulationStep * 1.8) * 3.6;
-      temp += 4.2;
-      noiseRel = 58 + Math.sin(localSimulationStep * 1.8) * 14;
-      pattern = 'periodic_pulses';
-      break;
-    case 'acoustic_spike':
-      noiseRel = 82 + Math.random() * 14;
-      temp = 41.2;
-      pattern = 'erratic_bursts';
-      break;
-    case 'normal':
-    default:
-      temp = 38.5 + Math.sin(localSimulationStep * 0.1) * 1.8;
-      noiseRel = 32 + Math.random() * 6;
-      pattern = 'steady';
-      break;
-  }
-
-  const dynamicAcc = Math.sqrt(x * x + y * y + Math.pow(z - 9.81, 2));
-  const resultant = Number(dynamicAcc.toFixed(2));
-  const rms = Number((dynamicAcc * 0.707 + (localSettings.demoScenario === 'unbalance' ? 1.8 : 0.4)).toFixed(2));
-  const peak = Number((dynamicAcc * 1.414 + 0.3).toFixed(2));
-
+function evaluateLocalHealth(
+  vibResultant: number,
+  noiseLevel: number,
+  settings: MachineSettings
+) {
   let vibStatus: HealthStatus = 'normal';
-  if (rms >= localSettings.vibrationCriticalThreshold) vibStatus = 'anomaly';
-  else if (rms >= localSettings.vibrationWarningThreshold) vibStatus = 'warning';
-
-  let tempStatus: HealthStatus = 'normal';
-  if (temp >= localSettings.tempCriticalThreshold) tempStatus = 'anomaly';
-  else if (temp >= localSettings.tempWarningThreshold) tempStatus = 'warning';
+  if (vibResultant >= settings.vibAnomalyThreshold) vibStatus = 'anomaly';
+  else if (vibResultant >= settings.vibWarningThreshold) vibStatus = 'warning';
 
   let noiseStatus: HealthStatus = 'normal';
-  if (noiseRel >= localSettings.noiseCriticalThreshold) noiseStatus = 'anomaly';
-  else if (noiseRel >= localSettings.noiseWarningThreshold) noiseStatus = 'warning';
+  if (noiseLevel >= settings.noiseAnomalyThreshold) noiseStatus = 'anomaly';
+  else if (noiseLevel >= settings.noiseWarningThreshold) noiseStatus = 'warning';
 
-  let vibPen = 0;
-  if (rms > localSettings.vibrationBaseline) {
-    vibPen = Math.min(45, Math.max(0, Math.round(((rms - localSettings.vibrationBaseline) / Math.max(0.1, localSettings.vibrationCriticalThreshold - localSettings.vibrationBaseline)) * 45)));
-  }
-  let thermPen = 0;
-  if (temp > localSettings.tempWarningThreshold) {
-    thermPen = Math.min(35, Math.max(0, Math.round(((temp - localSettings.tempWarningThreshold) / Math.max(1, localSettings.tempCriticalThreshold - localSettings.tempWarningThreshold)) * 35)));
-  }
-  let noisePen = 0;
-  if (noiseRel > localSettings.noiseWarningThreshold) {
-    noisePen = Math.min(20, Math.max(0, Math.round(((noiseRel - localSettings.noiseWarningThreshold) / Math.max(1, localSettings.noiseCriticalThreshold - localSettings.noiseWarningThreshold)) * 20)));
-  }
+  const vibPenalty = Math.min(
+    65,
+    Math.round((vibResultant / Math.max(0.1, settings.vibAnomalyThreshold)) * 55)
+  );
+  const acousticPenalty = Math.min(
+    35,
+    Math.round((noiseLevel / Math.max(1, settings.noiseAnomalyThreshold)) * 30)
+  );
 
-  const score = Math.max(0, 100 - (vibPen + thermPen + noisePen));
-  let status: HealthStatus = 'normal';
-  if (score < 60 || vibStatus === 'anomaly' || tempStatus === 'anomaly') status = 'anomaly';
-  else if (score < 80 || vibStatus === 'warning' || tempStatus === 'warning' || noiseStatus === 'warning') status = 'warning';
-
-  const reasons: string[] = [];
-  const recommendations: string[] = [];
-  if (vibStatus === 'anomaly') {
-    reasons.push(`Vibration RMS (${rms} m/s²) exceeds configured critical limit (${localSettings.vibrationCriticalThreshold} m/s²).`);
-    recommendations.push('Immediate mechanical inspection of spindle/bearing assembly; inspect for unbalance or loose coupling.');
-  } else if (vibStatus === 'warning') {
-    reasons.push(`Vibration RMS (${rms} m/s²) has exceeded configured warning threshold (${localSettings.vibrationWarningThreshold} m/s²).`);
-    recommendations.push('Check sensor ADXL345 magnetic/screw mounting rigidity; verify baseline alignment during off-peak load.');
-  }
-  if (tempStatus === 'anomaly') {
-    reasons.push(`DS18B20 temperature (${temp.toFixed(1)}°C) exceeds critical limit (${localSettings.tempCriticalThreshold}°C).`);
-    recommendations.push('Inspect cooling fan ducting, thermal paste/heatsink contact, and thermal overload relay.');
-  } else if (tempStatus === 'warning') {
-    reasons.push(`DS18B20 temperature (${temp.toFixed(1)}°C) elevated above warning threshold (${localSettings.tempWarningThreshold}°C).`);
-    recommendations.push('Verify machine ambient airflow and monitor motor casing temperature gradient.');
-  }
-  if (noiseStatus === 'anomaly') {
-    reasons.push(`MAX9814 relative acoustic envelope (${noiseRel.toFixed(1)}%) reached high-intensity peaks.`);
-    recommendations.push('Check for external acoustic interference, microphone placement proximity, or continuous bearing friction chatter.');
-  } else if (noiseStatus === 'warning') {
-    reasons.push(`MAX9814 relative acoustic level (${noiseRel.toFixed(1)}%) is above baseline operational envelope.`);
-    recommendations.push('Perform frequency spot check; verify if noise correlates with motor rotational speed.');
-  }
-  if (reasons.length === 0) {
-    reasons.push('All parameters (vibration, temperature, acoustic envelope) are operating within nominal baseline tolerances.');
-    recommendations.push('Maintain regular predictive maintenance logging and baseline calibration schedule.');
+  const score = Math.max(0, Math.min(100, 100 - (vibPenalty + acousticPenalty)));
+  let overallStatus: HealthStatus = 'normal';
+  if (vibStatus === 'anomaly' || noiseStatus === 'anomaly' || score < 55) {
+    overallStatus = 'anomaly';
+  } else if (vibStatus === 'warning' || noiseStatus === 'warning' || score < 78) {
+    overallStatus = 'warning';
   }
 
-  const health: MachineHealthEvaluation = {
-    score,
-    status,
-    reasons,
-    recommendations,
-    scoringFormula: {
-      vibrationPenalty: vibPen,
-      thermalPenalty: thermPen,
-      acousticPenalty: noisePen,
-      explanation: 'Health Score = 100 - (VibrationPenalty [0-45] + ThermalPenalty [0-35] + AcousticPenalty [0-20])'
+  const detectedConditions: string[] = [];
+  if (vibStatus === 'normal') detectedConditions.push('ADXL345 vibration within nominal bounds');
+  else if (vibStatus === 'warning') detectedConditions.push('Elevated ADXL345 vibration amplitude');
+  else detectedConditions.push('Critical ADXL345 vibration anomaly');
+
+  if (noiseStatus === 'normal') detectedConditions.push('MAX9814 acoustic signature stable');
+  else if (noiseStatus === 'warning') detectedConditions.push('Elevated MAX9814 noise index');
+  else detectedConditions.push('Severe MAX9814 acoustic spike detected');
+
+  const recommendation =
+    overallStatus === 'anomaly'
+      ? 'Inspect shaft coupling, rotor balance, and bearing housing immediately.'
+      : overallStatus === 'warning'
+        ? 'Schedule preventive lubrication and fastener torque verification.'
+        : 'Continue nominal monitoring. All 2-sensor readings are healthy.';
+
+  return {
+    vibStatus,
+    noiseStatus,
+    health: {
+      score,
+      status: overallStatus,
+      vibrationPenalty: vibPenalty,
+      acousticPenalty,
+      detectedConditions,
+      recommendation,
     },
-    disclaimer: 'Cautious Engineering Notice: Sensor deviations suggest condition variance. Physical inspection is required before asserting any confirmed mechanical failure.'
   };
+}
 
-  const point: TelemetryPoint = {
-    id: `local-pt-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-    timestamp: time,
+function generateOfflinePoint(): TelemetryPoint {
+  localStep += 1;
+  const now = new Date();
+  const isSpike = localStep % 19 === 0;
+  const wave = Math.sin(localStep * 0.45) * 0.04;
+  const x = Number((0.12 + wave + (isSpike ? 0.35 : 0)).toFixed(3));
+  const y = Number((0.1 + Math.cos(localStep * 0.35) * 0.03 + (isSpike ? 0.25 : 0)).toFixed(3));
+  const z = Number((0.14 + Math.sin(localStep * 0.25) * 0.02 + (isSpike ? 0.28 : 0)).toFixed(3));
+  const resultant = Number(Math.sqrt(x * x + y * y + z * z).toFixed(2));
+  const rms = Number((resultant * 0.72).toFixed(2));
+  const peak = Number((resultant * 1.48).toFixed(2));
+
+  const noiseRaw = 54 + Math.sin(localStep * 0.3) * 8 + (isSpike ? 28 : 0);
+  const relativeLevel = Math.max(15, Math.min(99, Math.round(noiseRaw)));
+  const peakLevel = Math.min(100, Math.round(relativeLevel + 9));
+  const patternState: NoisePatternState =
+    relativeLevel >= localSettings.noiseAnomalyThreshold
+      ? 'spike_detected'
+      : relativeLevel >= localSettings.noiseWarningThreshold
+        ? 'high_noise'
+        : 'normal';
+
+  const evalRes = evaluateLocalHealth(resultant, relativeLevel, localSettings);
+
+  const pt: TelemetryPoint = {
+    id: `offline_${localStep}_${now.getTime()}`,
     machineId: localSettings.machineId,
     machineName: localSettings.machineName,
+    timestamp: now.toISOString(),
+    mode: localSettings.mode,
+    deviceStatus: 'offline',
     vibration: {
-      x: Number(x.toFixed(2)),
-      y: Number(y.toFixed(2)),
-      z: Number(z.toFixed(2)),
+      x,
+      y,
+      z,
       resultant,
       rms,
       peak,
-      dominantFrequency: Number((48.7 + (localSettings.demoScenario === 'unbalance' ? 51.3 : (Math.random() - 0.5) * 0.4)).toFixed(1)),
+      dominantFrequency: Number((48.2 + Math.sin(localStep * 0.2) * 1.1).toFixed(1)),
       dominantFreqSource: 'demo',
-      baseline: localSettings.vibrationBaseline,
-      deviationPercent: Number((((rms - localSettings.vibrationBaseline) / localSettings.vibrationBaseline) * 100).toFixed(1)),
-      status: vibStatus
-    },
-    temperature: {
-      current: Number(temp.toFixed(1)),
-      min: 28.3,
-      max: 56.2,
-      warningThreshold: localSettings.tempWarningThreshold,
-      criticalThreshold: localSettings.tempCriticalThreshold,
-      status: tempStatus
+      status: evalRes.vibStatus,
     },
     noise: {
-      relativeLevel: Number(noiseRel.toFixed(1)),
-      peakLevel: Number(Math.min(100, noiseRel * 1.3).toFixed(1)),
-      variance: 1.2,
-      patternState: pattern,
-      trend: localSettings.demoScenario === 'bearing_wear' ? 'Rising' : localSettings.demoScenario === 'acoustic_spike' ? 'Fluctuating' : 'Stable',
-      status: noiseStatus,
-      calibrationNote: 'Uncalibrated relative acoustic envelope index (0-100%). Not calibrated dB SPL.'
+      relativeLevel,
+      peakLevel,
+      patternState,
+      trend: isSpike ? 'Spiking' : 'Stable',
+      status: evalRes.noiseStatus,
     },
-    health,
-    deviceStatus: 'offline', // Offline because demo mode / no ESP32 hardware connection
-    hardware: {
-      adxl345Connected: false,
-      ds18b20Connected: false,
-      max9814Connected: false
-    },
-    source: 'demo_simulation'
+    health: evalRes.health,
   };
 
-  return point;
+  localHistory.push(pt);
+  if (localHistory.length > 200) localHistory.shift();
+  return pt;
 }
 
-// Seed local history
-function initLocalHistory() {
-  if (localHistory.length === 0) {
-    const now = Date.now();
-    for (let i = 30; i >= 0; i--) {
-      localHistory.push(generateLocalPoint(new Date(now - i * 15000).toISOString()));
+export async function fetchLatestTelemetry(machineId = 'machine_01'): Promise<TelemetryPoint> {
+  try {
+    const res = await fetch(buildUrl(`/api/telemetry/latest?machineId=${encodeURIComponent(machineId)}`));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch {
+    return generateOfflinePoint();
+  }
+}
+
+export async function fetchTelemetryHistory(
+  range: '15m' | '1h' | '24h' | '7d' = '15m',
+  machineId = 'machine_01'
+): Promise<TelemetryPoint[]> {
+  try {
+    const res = await fetch(
+      buildUrl(`/api/telemetry/history?range=${range}&machineId=${encodeURIComponent(machineId)}`)
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch {
+    if (localHistory.length < 15) {
+      for (let i = 0; i < 20; i++) generateOfflinePoint();
     }
-  }
-}
-initLocalHistory();
-
-// API Client Functions with Fallback
-export async function fetchLatestTelemetry(): Promise<{ point: TelemetryPoint; settings: MachineSettings }> {
-  const base = getApiBaseUrl();
-  try {
-    const res = await fetch(`${base}/api/telemetry/latest`, { signal: AbortSignal.timeout(4000) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    return { point: data, settings: data.settings || localSettings };
-  } catch (err) {
-    // Fallback to local simulator (essential for APK without remote server configured)
-    const pt = generateLocalPoint();
-    localHistory.push(pt);
-    if (localHistory.length > 300) localHistory.shift();
-    return { point: pt, settings: localSettings };
-  }
-}
-
-export async function fetchTelemetryHistory(range: string = '15m'): Promise<TelemetryPoint[]> {
-  const base = getApiBaseUrl();
-  try {
-    const res = await fetch(`${base}/api/telemetry/history?range=${range}`, { signal: AbortSignal.timeout(4000) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    return data.points || [];
-  } catch (err) {
-    return localHistory.slice(-40);
+    return [...localHistory];
   }
 }
 
 export async function fetchAlerts(): Promise<AlertItem[]> {
-  const base = getApiBaseUrl();
   try {
-    const res = await fetch(`${base}/api/alerts`, { signal: AbortSignal.timeout(4000) });
+    const res = await fetch(buildUrl('/api/alerts'));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
-  } catch (err) {
-    return localAlerts;
+  } catch {
+    return [...localAlerts];
   }
 }
 
-export async function acknowledgeAlert(alertId: string): Promise<void> {
-  const base = getApiBaseUrl();
+export async function acknowledgeAlert(id: string): Promise<void> {
   try {
-    await fetch(`${base}/api/alerts/acknowledge`, {
+    await fetch(buildUrl('/api/alerts/acknowledge'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ alertId })
+      body: JSON.stringify({ id }),
     });
   } catch {
-    localAlerts = localAlerts.map(a => a.id === alertId ? { ...a, acknowledged: true } : a);
+    const item = localAlerts.find((a) => a.id === id);
+    if (item) item.acknowledged = true;
   }
 }
 
-export async function clearAcknowledgedAlerts(): Promise<void> {
-  const base = getApiBaseUrl();
+export async function clearAllAlerts(): Promise<void> {
   try {
-    await fetch(`${base}/api/alerts/clear`, { method: 'POST' });
+    await fetch(buildUrl('/api/alerts/clear'), { method: 'POST' });
   } catch {
-    localAlerts = localAlerts.filter(a => !a.acknowledged);
+    localAlerts.length = 0;
   }
 }
 
 export async function fetchSettings(): Promise<MachineSettings> {
-  const base = getApiBaseUrl();
   try {
-    const res = await fetch(`${base}/api/settings`, { signal: AbortSignal.timeout(4000) });
+    const res = await fetch(buildUrl('/api/settings'));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } catch {
-    return localSettings;
+    return { ...localSettings };
   }
 }
 
-export async function updateSettings(newSettings: Partial<MachineSettings>): Promise<MachineSettings> {
-  const base = getApiBaseUrl();
-  localSettings = { ...localSettings, ...newSettings };
+export async function updateSettings(
+  patch: Partial<MachineSettings>
+): Promise<MachineSettings> {
   try {
-    const res = await fetch(`${base}/api/settings`, {
+    const res = await fetch(buildUrl('/api/settings'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newSettings)
+      body: JSON.stringify(patch),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    return data.settings || localSettings;
+    return await res.json();
   } catch {
-    return localSettings;
+    localSettings = { ...localSettings, ...patch };
+    return { ...localSettings };
   }
 }
 
-export async function requestAiDiagnosis(): Promise<any> {
-  const base = getApiBaseUrl();
+export async function runAiDiagnosis(
+  machineId = 'machine_01'
+): Promise<AiDiagnosisResponse> {
   try {
-    const res = await fetch(`${base}/api/ai/diagnose`, { method: 'POST', signal: AbortSignal.timeout(8000) });
+    const res = await fetch(buildUrl('/api/ai/diagnose'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ machineId }),
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
-  } catch (err) {
-    const pt = localHistory[localHistory.length - 1] || generateLocalPoint();
+  } catch {
+    const latest = localHistory[localHistory.length - 1] || generateOfflinePoint();
     return {
-      vibrationAnalysis: `ADXL345 recorded resultant vibration is ${pt.vibration.resultant} m/s² with RMS of ${pt.vibration.rms} m/s² (baseline: ${pt.vibration.baseline} m/s², deviation: ${pt.vibration.deviationPercent}%). Based on configured machine threshold rules, vibration status sits in ${pt.vibration.status.toUpperCase()} band.`,
-      temperatureAnalysis: `DS18B20 digital temperature probe indicates ${pt.temperature.current}°C (warning threshold: ${pt.temperature.warningThreshold}°C, critical: ${pt.temperature.criticalThreshold}°C). Thermal status is ${pt.temperature.status.toUpperCase()}.`,
-      acousticAnalysis: `MAX9814 relative acoustic amplitude index is ${pt.noise.relativeLevel}% (peak: ${pt.noise.peakLevel}%). Pattern classified as ${pt.noise.patternState}. Note: Uncalibrated relative microphone signal.`,
-      holisticConditionScore: pt.health.score,
-      overallAssessment: pt.health.reasons.join(' '),
-      cautiousRecommendations: pt.health.recommendations,
-      disclaimer: 'Notice: This AI diagnostic evaluation is advisory. Sensor telemetry alone cannot establish conclusive mechanical diagnosis. Certified personnel physical inspection is required before taking equipment offline or performing teardown.',
-      geminiEnriched: false,
-      detailedAiReport: null
+      evaluation: latest.health,
+      detailedReport:
+        `Offline Rule-Based Diagnostic Summary (${latest.machineName}):\n` +
+        `• ADXL345 Resultant Acceleration: ${latest.vibration.resultant} m/s² (RMS ${latest.vibration.rms} m/s², Peak ${latest.vibration.peak} m/s²)\n` +
+        `• MAX9814 Relative Sound Index: ${latest.noise.relativeLevel}% (Pattern: ${latest.noise.patternState})\n` +
+        `• Deterministic Health Score: ${latest.health.score}/100 (${latest.health.status.toUpperCase()})\n\n` +
+        `Recommendation: ${latest.health.recommendation}`,
+      generatedBy: 'rule-engine',
+      timestamp: new Date().toISOString(),
     };
-  }
-}
-
-export async function testBackendConnection(url: string): Promise<{ success: boolean; message: string; latencyMs?: number }> {
-  const clean = url.trim().replace(/\/+$/, '');
-  const start = Date.now();
-  try {
-    const res = await fetch(`${clean}/api/telemetry/latest`, { signal: AbortSignal.timeout(5000) });
-    const latencyMs = Date.now() - start;
-    if (res.ok) {
-      const data = await res.json();
-      return { success: true, message: `Connected to ${data.machineName || 'SmartVibe Server'} (${latencyMs}ms)`, latencyMs };
-    }
-    return { success: false, message: `HTTP Error ${res.status} from server` };
-  } catch (err: any) {
-    return { success: false, message: err.message || 'Connection failed or timed out' };
   }
 }

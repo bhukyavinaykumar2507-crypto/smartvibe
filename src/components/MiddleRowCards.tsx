@@ -1,16 +1,17 @@
-import React, { useState } from 'react';
-import { 
-  Layers, 
-  Table, 
-  BrainCircuit, 
-  Lightbulb, 
-  Check, 
-  AlertTriangle, 
-  ShieldAlert, 
-  ArrowRight, 
-  ChevronRight 
+import React from 'react';
+import {
+  Activity,
+  Database,
+  Brain,
+  Check,
+  Lightbulb,
+  ChevronRight,
+  ArrowRight,
+  AlertTriangle,
+  ShieldAlert,
 } from 'lucide-react';
 import type { TelemetryPoint, MachineHealthEvaluation } from '../types/telemetry';
+import { AnimatedNumber } from './AnimatedNumber';
 
 interface MiddleRowCardsProps {
   points: TelemetryPoint[];
@@ -18,7 +19,11 @@ interface MiddleRowCardsProps {
   selectedRange: '15m' | '1h' | '24h' | '7d';
   onRangeChange: (range: '15m' | '1h' | '24h' | '7d') => void;
   onViewAllHistory: () => void;
-  onOpenAiDeepDive: () => void;
+  onOpenAiAnalysis: () => void;
+  deviceStatus?: 'online' | 'offline';
+  mode?: 'demo' | 'live';
+  isStreaming?: boolean;
+  lastUpdated?: string;
 }
 
 export const MiddleRowCards: React.FC<MiddleRowCardsProps> = ({
@@ -27,46 +32,86 @@ export const MiddleRowCards: React.FC<MiddleRowCardsProps> = ({
   selectedRange,
   onRangeChange,
   onViewAllHistory,
-  onOpenAiDeepDive,
+  onOpenAiAnalysis,
+  deviceStatus = 'offline',
+  mode = 'demo',
+  isStreaming = true,
+  lastUpdated = '',
 }) => {
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const isStale =
+    mode === 'live' &&
+    (!lastUpdated ||
+      Date.now() - new Date(lastUpdated).getTime() > 15000 ||
+      !isStreaming);
+  const isLiveFresh =
+    mode === 'live' && deviceStatus === 'online' && !isStale && isStreaming;
 
-  // Time & values for Combined Chart
-  const timestamps = points.map(p => p.timestamp);
-  const n = Math.max(1, timestamps.length);
+  // SVG Combined Multi-Series Chart
+  const width = 440;
+  const height = 190;
+  const padLeft = 36;
+  const padRight = 12;
+  const padTop = 16;
+  const padBottom = 26;
+  const chartW = width - padLeft - padRight;
+  const chartH = height - padTop - padBottom;
 
-  // Normalized values for comparison
-  const vibValues = points.map(p => Math.min(100, p.vibration.resultant * 50)); // scaled representation
-  const tempValues = points.map(p => Math.min(100, p.temperature.current)); // 0-100 scale
-  const noiseValues = points.map(p => Math.min(100, p.noise.relativeLevel)); // 0-100 scale
+  const n = Math.max(1, points.length);
+  const getX = (idx: number) => padLeft + (idx / Math.max(1, n - 1)) * chartW;
+  const getY = (val: number) =>
+    padTop + chartH - (Math.min(100, Math.max(0, val)) / 100) * chartH;
 
-  // Circular gauge math for AI Health Score
-  const radius = 38;
+  // Normalize vibration (0 - 1.5 m/s² -> 0 - 100) and noise (0 - 100%)
+  const vibNorm = points.map((p) => Math.min(100, (p.vibration.resultant / 1.5) * 100));
+  const noiseNorm = points.map((p) => Math.min(100, Math.max(0, p.noise.relativeLevel)));
+
+  const buildPolyline = (arr: number[]) =>
+    arr.map((v, i) => `${getX(i).toFixed(1)},${getY(v).toFixed(1)}`).join(' ');
+
+  const timeTickIndices = [
+    0,
+    Math.floor(n * 0.25),
+    Math.floor(n * 0.5),
+    Math.floor(n * 0.75),
+    n - 1,
+  ];
+  const recentFive = [...points].reverse().slice(0, 5);
+
+  // Health Circular Gauge SVG geometry
+  const radius = 42;
   const circumference = 2 * Math.PI * radius;
-  const strokeDashoffset = circumference - (latestHealth.score / 100) * circumference;
+  const clampedScore = Math.max(0, Math.min(100, latestHealth.score));
+  const strokeDashoffset = circumference - (clampedScore / 100) * circumference;
 
-  const getScoreColor = (score: number) => {
-    if (score >= 80) return '#06b6d4'; // Cyan/Teal
-    if (score >= 60) return '#f59e0b'; // Amber
-    return '#f43f5e'; // Rose
-  };
+  const gaugeColor =
+    latestHealth.status === 'anomaly'
+      ? '#f43f5e'
+      : latestHealth.status === 'warning'
+        ? '#f59e0b'
+        : '#10b981';
 
-  // Recent 5 readings (latest first)
-  const recentReadings = [...points].reverse().slice(0, 5);
+  const statusColorClass =
+    latestHealth.status === 'anomaly'
+      ? 'text-rose-400'
+      : latestHealth.status === 'warning'
+        ? 'text-amber-400'
+        : 'text-emerald-400';
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-      
-      {/* CARD 1: COMBINED SENSOR VIEW */}
-      <div className="rounded-2xl border border-slate-800/80 bg-[#0b1322] p-4 shadow-lg shadow-black/30 backdrop-blur-md flex flex-col justify-between">
-        
-        {/* Header */}
-        <div className="flex items-center justify-between mb-2">
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 sv-enter-d3">
+      {/* 1. COMBINED SENSOR VIEW (5 Columns on lg) */}
+      <div className="sv-card sv-card-neutral lg:col-span-5 rounded-2xl border border-slate-800/80 bg-[#0b1322]/95 p-4 shadow-lg shadow-black/30 backdrop-blur-md flex flex-col justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
           <div className="flex items-center gap-2">
-            <Layers className="h-4 w-4 text-cyan-400" />
+            <Activity className="h-4 w-4 text-cyan-400" />
             <h4 className="text-xs font-bold text-slate-100">Combined Sensor View</h4>
+            {isLiveFresh && (
+              <span className="inline-flex items-center gap-1 text-[9.5px] font-mono text-emerald-400">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                LIVE
+              </span>
+            )}
           </div>
-
           <div className="flex items-center gap-1 rounded-lg bg-slate-950 p-0.5 border border-slate-800">
             {(['15m', '1h', '24h', '7d'] as const).map((r) => (
               <button
@@ -84,304 +129,301 @@ export const MiddleRowCards: React.FC<MiddleRowCardsProps> = ({
           </div>
         </div>
 
-        {/* SVG Multi-Line Chart */}
-        <div className="relative w-full">
-          {(() => {
-            const width = 360;
-            const height = 180;
-            const padLeft = 32;
-            const padRight = 12;
-            const padTop = 14;
-            const padBottom = 26;
+        {points.length < 2 ? (
+          <div className="flex h-[185px] items-center justify-center rounded-xl border border-dashed border-slate-800 bg-slate-950/40 text-xs font-mono text-slate-500">
+            Waiting for dual-sensor telemetry points...
+          </div>
+        ) : (
+          <svg viewBox={`0 0 ${width} ${height}`} className="w-full overflow-visible select-none">
+            {[0, 25, 50, 75, 100].map((tickVal) => {
+              const yPos = getY(tickVal);
+              return (
+                <g key={tickVal}>
+                  <line
+                    x1={padLeft}
+                    y1={yPos}
+                    x2={width - padRight}
+                    y2={yPos}
+                    stroke="#1e293b"
+                    strokeWidth="0.8"
+                    strokeDasharray="2 2"
+                  />
+                  <text
+                    x={padLeft - 5}
+                    y={yPos + 3}
+                    textAnchor="end"
+                    className="fill-slate-400 text-[8.5px] font-mono tabular-nums"
+                  >
+                    {tickVal}
+                  </text>
+                </g>
+              );
+            })}
 
-            const chartW = width - padLeft - padRight;
-            const chartH = height - padTop - padBottom;
-            const getX = (idx: number) => padLeft + (idx / Math.max(1, n - 1)) * chartW;
-            const getY = (val: number) => padTop + chartH - ((Math.min(100, Math.max(0, val))) / 100) * chartH;
+            <polyline
+              fill="none"
+              stroke="#06b6d4"
+              strokeWidth="1.9"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              points={buildPolyline(vibNorm)}
+              className="sv-svg-smooth"
+            />
+            <polyline
+              fill="none"
+              stroke="#a855f7"
+              strokeWidth="1.9"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              points={buildPolyline(noiseNorm)}
+              className="sv-svg-smooth"
+            />
 
-            const vibPoints = vibValues.map((v, i) => `${getX(i)},${getY(v)}`).join(' ');
-            const tempPoints = tempValues.map((v, i) => `${getX(i)},${getY(v)}`).join(' ');
-            const noisePoints = noiseValues.map((v, i) => `${getX(i)},${getY(v)}`).join(' ');
+            {/* Latest points */}
+            <circle
+              cx={getX(points.length - 1)}
+              cy={getY(vibNorm[vibNorm.length - 1])}
+              r="3"
+              fill="#06b6d4"
+              stroke="#0b1322"
+              strokeWidth="1.4"
+              className="sv-svg-smooth"
+            />
+            <circle
+              cx={getX(points.length - 1)}
+              cy={getY(noiseNorm[noiseNorm.length - 1])}
+              r="3"
+              fill="#a855f7"
+              stroke="#0b1322"
+              strokeWidth="1.4"
+              className="sv-svg-smooth"
+            />
 
-            const yTicks = [0, 25, 50, 75, 100];
-            const timeTickIndices = [0, Math.floor(n * 0.25), Math.floor(n * 0.5), Math.floor(n * 0.75), n - 1];
-
-            return (
-              <svg viewBox={`0 0 ${width} ${height}`} className="w-full overflow-visible select-none">
-                {/* Y-Axis Label */}
+            {timeTickIndices.map((idx) => {
+              const timeStr = points[idx]?.timestamp
+                ? new Date(points[idx].timestamp).toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })
+                : '';
+              return (
                 <text
-                  x={-height / 2}
-                  y={8}
-                  transform="rotate(-90)"
+                  key={idx}
+                  x={getX(idx)}
+                  y={height - 8}
                   textAnchor="middle"
-                  className="fill-slate-500 text-[8.5px] font-sans font-medium"
+                  className="fill-slate-400 text-[8.5px] font-mono tabular-nums"
                 >
-                  Value
+                  {timeStr}
                 </text>
+              );
+            })}
+          </svg>
+        )}
 
-                {/* Grid ticks */}
-                {yTicks.map((val) => {
-                  const yPos = getY(val);
-                  return (
-                    <g key={val}>
-                      <line
-                        x1={padLeft}
-                        y1={yPos}
-                        x2={width - padRight}
-                        y2={yPos}
-                        stroke="#1e293b"
-                        strokeWidth="0.8"
-                        strokeDasharray="2 2"
-                      />
-                      <text
-                        x={padLeft - 4}
-                        y={yPos + 3}
-                        textAnchor="end"
-                        className="fill-slate-400 text-[8.5px] font-mono tabular-nums"
-                      >
-                        {val}
-                      </text>
-                    </g>
-                  );
-                })}
-
-                {/* Vibration Line (Cyan) */}
-                {vibValues.length > 1 && (
-                  <polyline
-                    fill="none"
-                    stroke="#06b6d4"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    points={vibPoints}
-                  />
-                )}
-
-                {/* Temperature Line (Orange) */}
-                {tempValues.length > 1 && (
-                  <polyline
-                    fill="none"
-                    stroke="#f59e0b"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    points={tempPoints}
-                  />
-                )}
-
-                {/* Noise Line (Purple) */}
-                {noiseValues.length > 1 && (
-                  <polyline
-                    fill="none"
-                    stroke="#a855f7"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    points={noisePoints}
-                  />
-                )}
-
-                {/* X-axis Timestamps */}
-                {timeTickIndices.map((idx) => {
-                  const timeStr = timestamps[idx]
-                    ? new Date(timestamps[idx]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                    : '';
-                  return (
-                    <text
-                      key={idx}
-                      x={getX(idx)}
-                      y={height - 8}
-                      textAnchor="middle"
-                      className="fill-slate-400 text-[8.5px] font-mono tabular-nums"
-                    >
-                      {timeStr}
-                    </text>
-                  );
-                })}
-              </svg>
-            );
-          })()}
-
-          {/* Legend */}
-          <div className="flex flex-wrap items-center justify-center gap-4 pt-2 text-[10px] font-mono border-t border-slate-800/80">
-            <div className="flex items-center gap-1.5">
-              <span className="h-0.5 w-3 bg-cyan-400" />
-              <span className="text-slate-300">Vibration (m/s²)</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
-              <span className="text-slate-300">Temperature (°C)</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="h-1.5 w-1.5 rounded-full bg-purple-400" />
-              <span className="text-slate-300">Noise (relative %)</span>
-            </div>
+        <div className="flex flex-wrap items-center justify-center gap-5 pt-2 border-t border-slate-800/70 text-[10px] font-mono text-slate-300">
+          <div className="flex items-center gap-1.5">
+            <span className="h-0.5 w-3 bg-cyan-400" />
+            <span>Vibration (ADXL345 scaled)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-full bg-purple-400" />
+            <span>Noise (MAX9814 relative %)</span>
           </div>
         </div>
-
       </div>
 
-      {/* CARD 2: RECENT READINGS TABLE */}
-      <div className="rounded-2xl border border-slate-800/80 bg-[#0b1322] p-4 shadow-lg shadow-black/30 backdrop-blur-md flex flex-col justify-between">
-        
-        {/* Header */}
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
-            <Table className="h-4 w-4 text-cyan-400" />
+      {/* 2. RECENT READINGS TABLE (3.5/12 -> 3 Columns on lg) */}
+      <div className="sv-card sv-card-neutral lg:col-span-3 rounded-2xl border border-slate-800/80 bg-[#0b1322]/95 p-4 shadow-lg shadow-black/30 backdrop-blur-md flex flex-col justify-between">
+        <div>
+          <div className="flex items-center gap-2 mb-3">
+            <Database className="h-4 w-4 text-cyan-400" />
             <h4 className="text-xs font-bold text-slate-100">Recent Readings</h4>
           </div>
-        </div>
 
-        {/* Table */}
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs font-mono">
-            <thead>
-              <tr className="border-b border-slate-800/90 text-[10px] text-slate-400">
-                <th className="py-1.5 px-2 font-medium">Time</th>
-                <th className="py-1.5 px-2 font-medium text-right">Vib (m/s²)</th>
-                <th className="py-1.5 px-2 font-medium text-right">Temp (°C)</th>
-                <th className="py-1.5 px-2 font-medium text-right">Noise (%)</th>
-                <th className="py-1.5 px-2 font-medium text-center">Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/50 text-[11px]">
-              {recentReadings.map((p) => {
-                const timeStr = new Date(p.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                return (
-                  <tr key={p.id} className="hover:bg-slate-800/30 transition-colors">
-                    <td className="py-2 px-2 text-slate-300 whitespace-nowrap">{timeStr}</td>
-                    <td className="py-2 px-2 text-right text-cyan-300 font-semibold tabular-nums">
-                      {p.vibration.resultant.toFixed(2)}
-                    </td>
-                    <td className="py-2 px-2 text-right text-amber-300 font-semibold tabular-nums">
-                      {p.temperature.current.toFixed(1)}
-                    </td>
-                    <td className="py-2 px-2 text-right text-purple-300 font-semibold tabular-nums">
-                      {Math.round(p.noise.relativeLevel)}
-                    </td>
-                    <td className="py-2 px-2 text-center whitespace-nowrap font-sans">
-                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-400">
-                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                        Normal
-                      </span>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-800/80 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                  <th className="py-1.5 pr-1">Time</th>
+                  <th className="py-1.5 px-1">Vib</th>
+                  <th className="py-1.5 px-1">Noise</th>
+                  <th className="py-1.5 pl-1 text-right">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/50 text-[11px] font-mono">
+                {recentFive.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="py-6 text-center text-slate-500 font-sans">
+                      No packets received yet
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                ) : (
+                  recentFive.map((pt) => (
+                    <tr key={pt.id} className="hover:bg-slate-800/35 transition-colors">
+                      <td className="py-2 pr-1 text-slate-300 tabular-nums">
+                        {new Date(pt.timestamp).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                          second: '2-digit',
+                        })}
+                      </td>
+                      <td className="py-2 px-1 text-slate-100 tabular-nums">
+                        {pt.vibration.resultant.toFixed(2)}
+                      </td>
+                      <td className="py-2 px-1 text-slate-100 tabular-nums">
+                        {pt.noise.relativeLevel}%
+                      </td>
+                      <td className="py-2 pl-1 text-right">
+                        <span
+                          className={`inline-flex items-center gap-1 text-[10px] font-sans font-semibold ${
+                            pt.health.status === 'anomaly'
+                              ? 'text-rose-400'
+                              : pt.health.status === 'warning'
+                                ? 'text-amber-400'
+                                : 'text-emerald-400'
+                          }`}
+                        >
+                          <span
+                            className={`h-1.5 w-1.5 rounded-full ${
+                              pt.health.status === 'anomaly'
+                                ? 'bg-rose-400'
+                                : pt.health.status === 'warning'
+                                  ? 'bg-amber-400'
+                                  : 'bg-emerald-400'
+                            }`}
+                          />
+                          <span className="capitalize">{pt.health.status}</span>
+                        </span>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
 
-        {/* View All Link */}
-        <div className="flex justify-end pt-2 border-t border-slate-800/80">
-          <button
-            onClick={onViewAllHistory}
-            className="flex items-center gap-1 text-xs font-semibold text-cyan-400 hover:text-cyan-300 transition-colors"
-          >
-            <span>View All</span>
-            <ArrowRight className="h-3 w-3" />
-          </button>
-        </div>
-
+        <button
+          onClick={onViewAllHistory}
+          className="mt-3 flex w-full items-center justify-end gap-1 text-[11px] font-semibold text-cyan-400 hover:text-cyan-300 transition-colors pt-2 border-t border-slate-800/70"
+        >
+          <span>View All</span>
+          <ArrowRight className="h-3 w-3" />
+        </button>
       </div>
 
-      {/* CARD 3: AI MACHINE HEALTH ANALYSIS */}
-      <div className="rounded-2xl border border-slate-800/80 bg-[#0b1322] p-4 shadow-lg shadow-black/30 backdrop-blur-md flex flex-col justify-between">
-        
-        {/* Header */}
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
-            <BrainCircuit className="h-4 w-4 text-cyan-400" />
-            <h4 className="text-xs font-bold text-slate-100">AI Machine Health Analysis</h4>
-          </div>
-          <div className="flex items-center gap-1 text-xs">
-            <span className="text-slate-400 text-[11px]">Status</span>
-            <span className="flex items-center gap-1 text-[11px] font-bold text-emerald-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              Normal
+      {/* 3. AI MACHINE HEALTH ANALYSIS CARD (4 Columns on lg) */}
+      <div
+        className={`sv-card sv-card-neutral lg:col-span-4 rounded-2xl border bg-[#0b1322]/95 p-4 shadow-lg shadow-black/30 backdrop-blur-md flex flex-col justify-between ${
+          latestHealth.status === 'anomaly'
+            ? 'border-rose-500/70 sv-anomaly-glow'
+            : latestHealth.status === 'warning'
+              ? 'border-amber-600/60'
+              : 'border-slate-800/80'
+        }`}
+      >
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Brain className="h-4 w-4 text-cyan-400" />
+              <h4 className="text-xs font-bold text-slate-100">AI Machine Health Analysis</h4>
+            </div>
+            <span className="text-[10px] font-mono text-slate-400">
+              -{latestHealth.vibrationPenalty + latestHealth.acousticPenalty} pts penalty
             </span>
           </div>
-        </div>
 
-        {/* Gauge + Detected Conditions */}
-        <div className="grid grid-cols-12 gap-3 items-center py-2">
-          {/* Radial Gauge */}
-          <div className="col-span-5 flex flex-col items-center justify-center">
-            <div className="relative flex items-center justify-center">
-              <svg className="h-24 w-24 -rotate-90" viewBox="0 0 100 100">
+          <div className="flex items-center gap-4">
+            {/* Animated Radial Gauge */}
+            <div className="relative flex h-24 w-24 shrink-0 items-center justify-center">
+              <svg className="h-24 w-24 -rotate-90 transform" viewBox="0 0 100 100">
                 <circle
                   cx="50"
                   cy="50"
                   r={radius}
-                  className="stroke-slate-800"
-                  strokeWidth="8"
+                  stroke="#1e293b"
+                  strokeWidth="9"
                   fill="transparent"
                 />
                 <circle
                   cx="50"
                   cy="50"
                   r={radius}
-                  stroke={getScoreColor(latestHealth.score)}
-                  strokeWidth="8"
+                  stroke={gaugeColor}
+                  strokeWidth="9"
                   strokeDasharray={circumference}
                   strokeDashoffset={strokeDashoffset}
                   strokeLinecap="round"
                   fill="transparent"
-                  className="transition-all duration-700 ease-out"
+                  className="sv-svg-smooth"
                 />
               </svg>
-              <div className="absolute flex flex-col items-center justify-center text-center">
-                <span className="text-2xl font-extrabold font-mono text-white tabular-nums">
-                  {latestHealth.score}
-                </span>
-                <span className="text-[9px] font-mono text-slate-400 tracking-tight">
-                  Health Score
-                </span>
+              <div className="absolute flex flex-col items-center text-center">
+                <AnimatedNumber
+                  value={clampedScore}
+                  decimals={0}
+                  duration={450}
+                  className="text-2xl font-extrabold font-mono text-white leading-none tabular-nums"
+                />
+                <span className="text-[8.5px] font-medium text-slate-400 mt-1">Health Score</span>
               </div>
             </div>
-          </div>
 
-          {/* Detected Conditions List */}
-          <div className="col-span-7 space-y-1.5 text-left text-xs">
-            <span className="text-[11px] font-bold text-slate-300 block mb-1">Detected Conditions</span>
-            <div className="flex items-center gap-1.5 text-[11px] text-slate-300">
-              <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-              <span>Vibration within normal range</span>
-            </div>
-            <div className="flex items-center gap-1.5 text-[11px] text-slate-300">
-              <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-              <span>Temperature stable</span>
-            </div>
-            <div className="flex items-center gap-1.5 text-[11px] text-slate-300">
-              <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-              <span>Noise level normal</span>
+            {/* Status & Conditions */}
+            <div className="flex-1 space-y-2 min-w-0">
+              <div className="flex items-center justify-between text-xs pb-1 border-b border-slate-800/80">
+                <span className="text-slate-400 font-medium">Status</span>
+                <span className={`inline-flex items-center gap-1.5 font-bold capitalize ${statusColorClass}`}>
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      latestHealth.status === 'anomaly'
+                        ? 'bg-rose-400'
+                        : latestHealth.status === 'warning'
+                          ? 'bg-amber-400'
+                          : 'bg-emerald-400'
+                    }`}
+                  />
+                  {latestHealth.status}
+                </span>
+              </div>
+
+              <div>
+                <p className="text-[10px] font-semibold text-slate-400 mb-1">Detected Conditions</p>
+                <div className="space-y-1 text-[10.5px] text-slate-300">
+                  {latestHealth.detectedConditions.slice(0, 3).map((cond, idx) => (
+                    <div key={idx} className="flex items-start gap-1.5">
+                      {latestHealth.status === 'anomaly' ? (
+                        <ShieldAlert className="h-3 w-3 text-rose-400 shrink-0 mt-0.5" />
+                      ) : latestHealth.status === 'warning' ? (
+                        <AlertTriangle className="h-3 w-3 text-amber-400 shrink-0 mt-0.5" />
+                      ) : (
+                        <Check className="h-3 w-3 text-emerald-400 shrink-0 mt-0.5" />
+                      )}
+                      <span className="leading-snug">{cond}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         </div>
 
         {/* Recommendation Box */}
-        <div 
-          onClick={onOpenAiDeepDive}
-          className="mt-2 flex items-center justify-between rounded-xl border border-cyan-900/50 bg-[#0d1728] p-2.5 cursor-pointer hover:border-cyan-600 transition-colors"
+        <button
+          onClick={onOpenAiAnalysis}
+          className="mt-4 flex w-full items-center justify-between gap-2 rounded-xl border border-teal-500/30 bg-teal-950/20 px-3 py-2 text-left hover:bg-teal-950/40 hover:border-teal-400/50 transition-all group"
         >
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-cyan-500/20 text-cyan-400 shrink-0">
-              <Lightbulb className="h-4 w-4" />
-            </div>
-            <div className="text-left">
-              <span className="text-[10px] font-bold text-slate-400 block uppercase tracking-wider">
-                Recommendation
-              </span>
-              <span className="text-xs font-medium text-slate-200 block">
-                {latestHealth.recommendations[0] || 'Continue monitoring. No action required.'}
-              </span>
+          <div className="flex items-start gap-2.5 min-w-0">
+            <Lightbulb className="h-4 w-4 text-teal-400 shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <p className="text-[11px] font-bold text-teal-300">Recommendation</p>
+              <p className="text-[10.5px] text-slate-300 truncate">{latestHealth.recommendation}</p>
             </div>
           </div>
-          <ChevronRight className="h-4 w-4 text-cyan-400 shrink-0" />
-        </div>
-
+          <ChevronRight className="h-4 w-4 text-slate-400 group-hover:text-teal-300 group-hover:translate-x-0.5 transition-all shrink-0" />
+        </button>
       </div>
-
     </div>
   );
 };

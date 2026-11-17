@@ -1,574 +1,544 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import dotenv from 'dotenv';
+import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
-import type { 
-  TelemetryPoint, 
-  MachineSettings, 
-  AlertItem, 
+import type {
+  TelemetryPoint,
+  AlertItem,
+  MachineSettings,
   HealthStatus,
-  MachineHealthEvaluation 
-} from './src/types/telemetry.ts';
-
-dotenv.config();
+  NoisePatternState,
+  MachineHealthEvaluation,
+} from './src/types/telemetry';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
 
-app.use(cors());
-app.use(express.json());
-
-// In-memory state
-let settings: MachineSettings = {
-  machineId: 'machine_01',
-  machineName: 'Machine 01 — CNC Spindle Drive',
-  machineType: 'Three-Phase AC Induction Motor & Milling Spindle',
-  location: 'Lab Test Bay 3 / Bench A',
-  mode: 'demo',
-  demoScenario: 'normal',
-  tempWarningThreshold: 55,
-  tempCriticalThreshold: 75,
-  vibrationBaseline: 1.2, // m/s² baseline acceleration
-  vibrationWarningThreshold: 2.8, // m/s² configured warning threshold
-  vibrationCriticalThreshold: 4.5, // m/s² configured critical threshold
-  noiseWarningThreshold: 68, // % relative noise level
-  noiseCriticalThreshold: 85, // % relative noise level
+const MACHINE_CATALOG: Record<string, string> = {
+  machine_01: 'Machine 01 — CNC Spindle Motor',
+  machine_02: 'Machine 02 — Centrifugal Slurry Pump',
+  machine_03: 'Machine 03 — Industrial Blower',
 };
 
-let telemetryHistory: TelemetryPoint[] = [];
-let alerts: AlertItem[] = [];
-let lastHardwarePacketTime: number = 0;
-let simulationStep = 0;
+let settings: MachineSettings = {
+  machineId: 'machine_01',
+  machineName: 'Machine 01',
+  mode: 'demo',
+  vibWarningThreshold: 0.45,
+  vibAnomalyThreshold: 0.85,
+  noiseWarningThreshold: 72,
+  noiseAnomalyThreshold: 88,
+  esp32TimeoutSeconds: 15,
+};
 
-// Transparent rule-based health scoring algorithm based on established baseline thresholds
-function evaluateHealth(
-  vibrationRMS: number,
-  temperature: number,
-  noiseRelative: number,
+const historyByMachine: Record<string, TelemetryPoint[]> = {
+  machine_01: [],
+  machine_02: [],
+  machine_03: [],
+};
+
+const lastHardwarePacketByMachine: Record<string, number> = {
+  machine_01: 0,
+  machine_02: 0,
+  machine_03: 0,
+};
+
+const alerts: AlertItem[] = [];
+let simCounter = 0;
+
+function evaluateMachineHealth(
+  vibResultant: number,
+  noiseLevel: number,
   cfg: MachineSettings
-): MachineHealthEvaluation {
-  // Vibration penalty (0 - 45 pts)
-  let vibPenalty = 0;
-  if (vibrationRMS > cfg.vibrationBaseline) {
-    const range = Math.max(0.1, cfg.vibrationCriticalThreshold - cfg.vibrationBaseline);
-    const ratio = (vibrationRMS - cfg.vibrationBaseline) / range;
-    vibPenalty = Math.min(45, Math.max(0, Math.round(ratio * 45)));
+): {
+  vibStatus: HealthStatus;
+  noiseStatus: HealthStatus;
+  health: MachineHealthEvaluation;
+} {
+  let vibStatus: HealthStatus = 'normal';
+  if (vibResultant >= cfg.vibAnomalyThreshold) vibStatus = 'anomaly';
+  else if (vibResultant >= cfg.vibWarningThreshold) vibStatus = 'warning';
+
+  let noiseStatus: HealthStatus = 'normal';
+  if (noiseLevel >= cfg.noiseAnomalyThreshold) noiseStatus = 'anomaly';
+  else if (noiseLevel >= cfg.noiseWarningThreshold) noiseStatus = 'warning';
+
+  // Deterministic 2-sensor scoring: Vibration penalty (0-65) + Acoustic penalty (0-35)
+  const vibPenalty = Math.min(
+    65,
+    Math.round((vibResultant / Math.max(0.1, cfg.vibAnomalyThreshold)) * 55)
+  );
+  const acousticPenalty = Math.min(
+    35,
+    Math.round((noiseLevel / Math.max(1, cfg.noiseAnomalyThreshold)) * 30)
+  );
+  const score = Math.max(0, Math.min(100, 100 - (vibPenalty + acousticPenalty)));
+
+  let overallStatus: HealthStatus = 'normal';
+  if (vibStatus === 'anomaly' || noiseStatus === 'anomaly' || score < 55) {
+    overallStatus = 'anomaly';
+  } else if (vibStatus === 'warning' || noiseStatus === 'warning' || score < 78) {
+    overallStatus = 'warning';
   }
 
-  // Thermal penalty (0 - 35 pts)
-  let thermPenalty = 0;
-  if (temperature > cfg.tempWarningThreshold) {
-    const range = Math.max(1, cfg.tempCriticalThreshold - cfg.tempWarningThreshold);
-    const ratio = (temperature - cfg.tempWarningThreshold) / range;
-    thermPenalty = Math.min(35, Math.max(0, Math.round(ratio * 35)));
+  const detectedConditions: string[] = [];
+  if (vibStatus === 'normal') {
+    detectedConditions.push('ADXL345 tri-axial vibration within nominal operating envelope');
+  } else if (vibStatus === 'warning') {
+    detectedConditions.push('Elevated ADXL345 resultant acceleration approaching warning limit');
+  } else {
+    detectedConditions.push('Severe ADXL345 vibration anomaly — check imbalance or misalignment');
   }
 
-  // Acoustic penalty (0 - 20 pts)
-  let noisePenalty = 0;
-  if (noiseRelative > cfg.noiseWarningThreshold) {
-    const range = Math.max(1, cfg.noiseCriticalThreshold - cfg.noiseWarningThreshold);
-    const ratio = (noiseRelative - cfg.noiseWarningThreshold) / range;
-    noisePenalty = Math.min(20, Math.max(0, Math.round(ratio * 20)));
+  if (noiseStatus === 'normal') {
+    detectedConditions.push('MAX9814 acoustic envelope within normal baseline');
+  } else if (noiseStatus === 'warning') {
+    detectedConditions.push('Elevated MAX9814 relative sound intensity detected');
+  } else {
+    detectedConditions.push('Critical MAX9814 acoustic transient spike detected');
   }
 
-  const score = Math.max(0, 100 - (vibPenalty + thermPenalty + noisePenalty));
-
-  let status: HealthStatus = 'normal';
-  if (score < 60 || vibrationRMS >= cfg.vibrationCriticalThreshold || temperature >= cfg.tempCriticalThreshold) {
-    status = 'anomaly';
-  } else if (score < 80 || vibrationRMS >= cfg.vibrationWarningThreshold || temperature >= cfg.tempWarningThreshold || noiseRelative >= cfg.noiseWarningThreshold) {
-    status = 'warning';
-  }
-
-  const reasons: string[] = [];
-  const recommendations: string[] = [];
-
-  if (vibrationRMS >= cfg.vibrationCriticalThreshold) {
-    reasons.push(`Vibration RMS (${vibrationRMS.toFixed(2)} m/s²) exceeds configured critical limit (${cfg.vibrationCriticalThreshold} m/s²).`);
-    recommendations.push('Immediate mechanical inspection of spindle/bearing assembly; inspect for unbalance or loose coupling.');
-  } else if (vibrationRMS >= cfg.vibrationWarningThreshold) {
-    reasons.push(`Vibration RMS (${vibrationRMS.toFixed(2)} m/s²) has exceeded configured warning threshold (${cfg.vibrationWarningThreshold} m/s²).`);
-    recommendations.push('Check sensor ADXL345 magnetic/screw mounting rigidity; verify baseline alignment during off-peak load.');
-  }
-
-  if (temperature >= cfg.tempCriticalThreshold) {
-    reasons.push(`DS18B20 temperature (${temperature.toFixed(1)}°C) exceeds critical limit (${cfg.tempCriticalThreshold}°C).`);
-    recommendations.push('Inspect cooling fan ducting, thermal paste/heatsink contact, and thermal overload relay.');
-  } else if (temperature >= cfg.tempWarningThreshold) {
-    reasons.push(`DS18B20 temperature (${temperature.toFixed(1)}°C) elevated above warning threshold (${cfg.tempWarningThreshold}°C).`);
-    recommendations.push('Verify machine ambient airflow and monitor motor casing temperature gradient.');
-  }
-
-  if (noiseRelative >= cfg.noiseCriticalThreshold) {
-    reasons.push(`MAX9814 relative acoustic envelope (${noiseRelative.toFixed(1)}%) reached high-intensity peaks.`);
-    recommendations.push('Check for external acoustic interference, microphone placement proximity, or continuous bearing friction chatter.');
-  } else if (noiseRelative >= cfg.noiseWarningThreshold) {
-    reasons.push(`MAX9814 relative acoustic level (${noiseRelative.toFixed(1)}%) is above baseline operational envelope.`);
-    recommendations.push('Perform frequency spot check; verify if noise correlates with motor rotational speed.');
-  }
-
-  if (reasons.length === 0) {
-    reasons.push('All parameters (vibration, temperature, acoustic envelope) are operating within nominal baseline tolerances.');
-    recommendations.push('Maintain regular predictive maintenance logging and baseline calibration schedule.');
-  }
+  const recommendation =
+    overallStatus === 'anomaly'
+      ? 'Inspect shaft alignment, bearing raceway wear, and mounting bolts immediately.'
+      : overallStatus === 'warning'
+        ? 'Schedule bearing lubrication check and fastener torque verification.'
+        : 'Continue routine telemetry monitoring. No corrective maintenance required.';
 
   return {
-    score,
-    status,
-    reasons,
-    recommendations,
-    scoringFormula: {
+    vibStatus,
+    noiseStatus,
+    health: {
+      score,
+      status: overallStatus,
       vibrationPenalty: vibPenalty,
-      thermalPenalty: thermPenalty,
-      acousticPenalty: noisePenalty,
-      explanation: 'Health Score = 100 - (VibrationPenalty [0-45] + ThermalPenalty [0-35] + AcousticPenalty [0-20])'
+      acousticPenalty: acousticPenalty,
+      detectedConditions,
+      recommendation,
     },
-    disclaimer: 'Cautious Engineering Notice: Sensor deviations suggest condition variance. Physical inspection is required before asserting any confirmed mechanical failure.'
   };
 }
 
-// Generate a synthetic or calibrated data point
-function createSyntheticDataPoint(timestampStr?: string): TelemetryPoint {
-  const timestamp = timestampStr || new Date().toISOString();
-  simulationStep += 0.2;
-
-  let x = 0.4 + Math.sin(simulationStep * 0.7) * 0.2;
-  let y = 0.3 + Math.cos(simulationStep * 0.5) * 0.15;
-  let z = 9.81 + Math.sin(simulationStep * 1.2) * 0.25; // gravity + perturbation
-  let temp = 39.2 + Math.sin(simulationStep * 0.1) * 2.5;
-  let noiseRel = 35 + Math.sin(simulationStep * 0.8) * 8;
-  let pattern: 'steady' | 'periodic_pulses' | 'erratic_bursts' = 'steady';
-
-  // Apply scenario modifications
-  switch (settings.demoScenario) {
-    case 'bearing_wear':
-      // Higher vibration with sporadic shock peaks and friction acoustics
-      x += (Math.random() > 0.7 ? 2.5 : 1.2) + Math.sin(simulationStep * 2.8) * 0.9;
-      y += 1.4 + Math.cos(simulationStep * 2.1) * 0.7;
-      temp += 8.5 + (Math.sin(simulationStep * 0.15) * 3);
-      noiseRel = 69 + Math.random() * 12;
-      pattern = 'periodic_pulses';
-      break;
-
-    case 'overheating':
-      // High temperature condition
-      temp = 68.4 + Math.sin(simulationStep * 0.2) * 6;
-      x += 0.6;
-      y += 0.5;
-      noiseRel = 44 + Math.random() * 6;
-      pattern = 'steady';
-      break;
-
-    case 'unbalance':
-      // Massive 1X rotational vibration
-      x += Math.sin(simulationStep * 1.8) * 3.8;
-      y += Math.cos(simulationStep * 1.8) * 3.6;
-      temp += 4.2;
-      noiseRel = 58 + Math.sin(simulationStep * 1.8) * 14;
-      pattern = 'periodic_pulses';
-      break;
-
-    case 'acoustic_spike':
-      // High noise bursts while vibration is steady
-      noiseRel = 82 + Math.random() * 14;
-      temp = 41.2;
-      pattern = 'erratic_bursts';
-      break;
-
-    case 'normal':
-    default:
-      // Nominal, stable operational condition
-      temp = 38.5 + Math.sin(simulationStep * 0.1) * 1.8;
-      noiseRel = 32 + Math.random() * 6;
-      pattern = 'steady';
-      break;
-  }
-
-  // Jitter
-  x += (Math.random() - 0.5) * 0.15;
-  y += (Math.random() - 0.5) * 0.15;
-  z += (Math.random() - 0.5) * 0.15;
-
-  const dynamicAcc = Math.sqrt(x * x + y * y + Math.pow(z - 9.81, 2));
-  const resultant = Number(dynamicAcc.toFixed(2));
-  const rms = Number((dynamicAcc * 0.707 + (settings.demoScenario === 'unbalance' ? 1.8 : 0.4)).toFixed(2));
-  const peak = Number((dynamicAcc * 1.414 + 0.3).toFixed(2));
-
-  // Determine individual statuses
-  let vibStatus: HealthStatus = 'normal';
-  if (rms >= settings.vibrationCriticalThreshold) vibStatus = 'anomaly';
-  else if (rms >= settings.vibrationWarningThreshold) vibStatus = 'warning';
-
-  let tempStatus: HealthStatus = 'normal';
-  if (temp >= settings.tempCriticalThreshold) tempStatus = 'anomaly';
-  else if (temp >= settings.tempWarningThreshold) tempStatus = 'warning';
-
-  let noiseStatus: HealthStatus = 'normal';
-  if (noiseRel >= settings.noiseCriticalThreshold) noiseStatus = 'anomaly';
-  else if (noiseRel >= settings.noiseWarningThreshold) noiseStatus = 'warning';
-
-  // Overall evaluation
-  const health = evaluateHealth(rms, temp, noiseRel, settings);
-
-  // Check alert creation
-  if (health.status !== 'normal') {
-    const existingUnack = alerts.find(a => !a.acknowledged && a.severity === health.status);
-    if (!existingUnack || alerts.length < 5) {
-      const topReason = health.reasons[0] || 'Condition parameter alert';
-      const sensorName = vibStatus !== 'normal' 
-        ? 'ADXL345 Vibration' 
-        : tempStatus !== 'normal' 
-          ? 'DS18B20 Temperature' 
-          : 'MAX9814 Noise';
-      
-      const newAlert: AlertItem = {
-        id: `alert-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        timestamp,
-        severity: health.status,
-        sensor: sensorName,
-        parameter: sensorName.includes('Vibration') ? 'Vibration RMS' : sensorName.includes('Temperature') ? 'Temperature' : 'Acoustic Level',
-        recordedValue: sensorName.includes('Vibration') ? `${rms} m/s²` : sensorName.includes('Temperature') ? `${temp.toFixed(1)}°C` : `${noiseRel.toFixed(1)}%`,
-        thresholdValue: sensorName.includes('Vibration') ? `${settings.vibrationWarningThreshold} m/s²` : sensorName.includes('Temperature') ? `${settings.tempWarningThreshold}°C` : `${settings.noiseWarningThreshold}%`,
-        deviation: `+${((rms - settings.vibrationBaseline) / settings.vibrationBaseline * 100).toFixed(0)}%`,
-        suggestedAction: health.recommendations[0] || 'Inspect physical mounting and verify cable connections.',
-        acknowledged: false
-      };
-
-      // Keep alerts array clean (max 50)
-      if (!alerts.some(a => a.parameter === newAlert.parameter && a.severity === newAlert.severity && !a.acknowledged)) {
-        alerts.unshift(newAlert);
-        if (alerts.length > 50) alerts.pop();
-      }
+function recordAlertsIfNeeded(point: TelemetryPoint) {
+  if (point.vibration.status !== 'normal') {
+    const severity = point.vibration.status === 'anomaly' ? 'anomaly' : 'warning';
+    const lastSame = alerts.find(
+      (a) => a.sensor === 'Vibration (ADXL345)' && a.severity === severity
+    );
+    const recentlyAdded =
+      lastSame && Date.now() - new Date(lastSame.timestamp).getTime() < 20000;
+    if (!recentlyAdded) {
+      alerts.unshift({
+        id: `alt_vib_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: point.timestamp,
+        severity,
+        sensor: 'Vibration (ADXL345)',
+        value: `${point.vibration.resultant.toFixed(2)} m/s²`,
+        threshold:
+          severity === 'anomaly'
+            ? `>= ${settings.vibAnomalyThreshold} m/s²`
+            : `>= ${settings.vibWarningThreshold} m/s²`,
+        message:
+          severity === 'anomaly'
+            ? `Vibration spike (${point.vibration.resultant.toFixed(2)} m/s²) exceeded anomaly threshold on ${point.machineName}`
+            : `Vibration amplitude (${point.vibration.resultant.toFixed(2)} m/s²) approaching advisory limit`,
+        acknowledged: false,
+      });
     }
   }
 
-  // Historical temperature stats
-  const tempHistory = telemetryHistory.map(p => p.temperature.current).concat([temp]);
-  const minTemp = Number(Math.min(...tempHistory).toFixed(1));
-  const maxTemp = Number(Math.max(...tempHistory).toFixed(1));
+  if (point.noise.status !== 'normal') {
+    const severity = point.noise.status === 'anomaly' ? 'anomaly' : 'warning';
+    const lastSame = alerts.find(
+      (a) => a.sensor === 'Noise (MAX9814)' && a.severity === severity
+    );
+    const recentlyAdded =
+      lastSame && Date.now() - new Date(lastSame.timestamp).getTime() < 20000;
+    if (!recentlyAdded) {
+      alerts.unshift({
+        id: `alt_noise_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: point.timestamp,
+        severity,
+        sensor: 'Noise (MAX9814)',
+        value: `${point.noise.relativeLevel}%`,
+        threshold:
+          severity === 'anomaly'
+            ? `>= ${settings.noiseAnomalyThreshold}%`
+            : `>= ${settings.noiseWarningThreshold}%`,
+        message:
+          severity === 'anomaly'
+            ? `Acoustic transient (${point.noise.relativeLevel}%) exceeded anomaly limit on ${point.machineName}`
+            : `Elevated relative noise level (${point.noise.relativeLevel}%) detected`,
+        acknowledged: false,
+      });
+    }
+  }
 
-  const isLiveConnected = settings.mode === 'live' && (Date.now() - lastHardwarePacketTime < 15000);
-
-  return {
-    id: `pt-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-    timestamp,
-    machineId: settings.machineId,
-    machineName: settings.machineName,
-    vibration: {
-      x: Number(x.toFixed(2)),
-      y: Number(y.toFixed(2)),
-      z: Number(z.toFixed(2)),
-      resultant: Number((dynamicAcc > 0 ? dynamicAcc * 0.25 + 0.18 : 0.18).toFixed(2)),
-      rms: Number((rms * 0.2 + 0.12).toFixed(2)),
-      peak: Number((peak * 0.2 + 0.36).toFixed(2)),
-      dominantFrequency: Number((48.7 + (settings.demoScenario === 'unbalance' ? 51.3 : (Math.random() - 0.5) * 0.4)).toFixed(1)),
-      dominantFreqSource: 'demo',
-      baseline: settings.vibrationBaseline,
-      deviationPercent: Number((((rms - settings.vibrationBaseline) / settings.vibrationBaseline) * 100).toFixed(1)),
-      status: vibStatus,
-    },
-    temperature: {
-      current: Number(temp.toFixed(1)),
-      min: minTemp || 28.3,
-      max: maxTemp || 56.2,
-      warningThreshold: settings.tempWarningThreshold,
-      criticalThreshold: settings.tempCriticalThreshold,
-      status: tempStatus,
-    },
-    noise: {
-      relativeLevel: Number(noiseRel.toFixed(1)),
-      peakLevel: Number(Math.min(150, noiseRel * 1.5).toFixed(1)),
-      variance: Number((Math.random() * 4.2).toFixed(2)),
-      patternState: pattern,
-      trend: settings.demoScenario === 'bearing_wear' ? 'Rising' : settings.demoScenario === 'acoustic_spike' ? 'Fluctuating' : 'Stable',
-      status: noiseStatus,
-      calibrationNote: 'Uncalibrated relative acoustic envelope index (0-100%). Not calibrated dB SPL.'
-    },
-    health,
-    deviceStatus: isLiveConnected ? 'online' : 'offline',
-    hardware: {
-      adxl345Connected: isLiveConnected,
-      ds18b20Connected: isLiveConnected,
-      max9814Connected: isLiveConnected,
-    },
-    source: settings.mode === 'live' ? 'esp32_hardware' : 'demo_simulation'
-  };
-}
-
-// Seed initial history points
-function seedTelemetryHistory() {
-  telemetryHistory = [];
-  const now = Date.now();
-  const pointsCount = 60; // past 60 intervals
-  for (let i = pointsCount; i >= 0; i--) {
-    const time = new Date(now - i * 15000).toISOString();
-    const pt = createSyntheticDataPoint(time);
-    telemetryHistory.push(pt);
+  if (alerts.length > 60) {
+    alerts.length = 60;
   }
 }
-seedTelemetryHistory();
 
-// Background tick for simulation
+function generateDemoPoint(machineId: string, timestampMs = Date.now()): TelemetryPoint {
+  simCounter += 1;
+  const offset = machineId === 'machine_02' ? 0.08 : machineId === 'machine_03' ? 0.05 : 0;
+  const isPulse = simCounter % 29 === 0;
+
+  const x = Number((0.12 + offset + Math.sin(simCounter * 0.42) * 0.04 + (isPulse ? 0.34 : 0)).toFixed(3));
+  const y = Number((0.11 + offset * 0.7 + Math.cos(simCounter * 0.31) * 0.03 + (isPulse ? 0.25 : 0)).toFixed(3));
+  const z = Number((0.15 + offset * 0.5 + Math.sin(simCounter * 0.24) * 0.02 + (isPulse ? 0.22 : 0)).toFixed(3));
+  const resultant = Number(Math.sqrt(x * x + y * y + z * z).toFixed(2));
+  const rms = Number((resultant * 0.72).toFixed(2));
+  const peak = Number((resultant * 1.46).toFixed(2));
+
+  const noiseBase = machineId === 'machine_02' ? 61 : machineId === 'machine_03' ? 58 : 52;
+  const noiseLevel = Math.max(
+    18,
+    Math.min(
+      98,
+      Math.round(noiseBase + Math.sin(simCounter * 0.29) * 8 + (isPulse ? 24 : 0))
+    )
+  );
+  const peakLevel = Math.min(100, Math.round(noiseLevel + 9));
+  const patternState: NoisePatternState =
+    noiseLevel >= settings.noiseAnomalyThreshold
+      ? 'spike_detected'
+      : noiseLevel >= settings.noiseWarningThreshold
+        ? 'high_noise'
+        : 'normal';
+
+  const evalRes = evaluateMachineHealth(resultant, noiseLevel, settings);
+  const ts = new Date(timestampMs).toISOString();
+
+  const point: TelemetryPoint = {
+    id: `demo_${machineId}_${timestampMs}_${simCounter}`,
+    machineId,
+    machineName: MACHINE_CATALOG[machineId]?.split(' — ')[0] || 'Machine 01',
+    timestamp: ts,
+    mode: 'demo',
+    deviceStatus: 'offline',
+    vibration: {
+      x,
+      y,
+      z,
+      resultant,
+      rms,
+      peak,
+      dominantFrequency: Number((48.5 + Math.sin(simCounter * 0.17) * 1.3).toFixed(1)),
+      dominantFreqSource: 'demo',
+      status: evalRes.vibStatus,
+    },
+    noise: {
+      relativeLevel: noiseLevel,
+      peakLevel,
+      patternState,
+      trend: isPulse ? 'Rising' : 'Stable',
+      status: evalRes.noiseStatus,
+    },
+    health: evalRes.health,
+  };
+
+  return point;
+}
+
+// Seed initial demo history across machines
+for (const mId of Object.keys(historyByMachine)) {
+  const now = Date.now();
+  for (let i = 45; i >= 1; i--) {
+    const pt = generateDemoPoint(mId, now - i * 15000);
+    historyByMachine[mId].push(pt);
+  }
+}
+
+// Background simulation tick when in demo mode
 setInterval(() => {
-  if (settings.mode === 'demo') {
-    const pt = createSyntheticDataPoint();
-    telemetryHistory.push(pt);
-    if (telemetryHistory.length > 300) {
-      telemetryHistory.shift();
+  if (settings.mode !== 'demo') return;
+  for (const mId of Object.keys(historyByMachine)) {
+    const pt = generateDemoPoint(mId);
+    const list = historyByMachine[mId];
+    list.push(pt);
+    if (list.length > 300) list.shift();
+    if (mId === settings.machineId) {
+      recordAlertsIfNeeded(pt);
     }
   }
 }, 2000);
 
-// API Endpoints
+function isHardwareOnline(machineId: string): boolean {
+  const lastMs = lastHardwarePacketByMachine[machineId] || 0;
+  if (!lastMs) return false;
+  return Date.now() - lastMs <= settings.esp32TimeoutSeconds * 1000;
+}
 
-// 1. Telemetry Latest
-app.get('/api/telemetry/latest', (_req, res) => {
-  const latest = telemetryHistory[telemetryHistory.length - 1] || createSyntheticDataPoint();
-  // Recalculate deviceStatus dynamically: NEVER show 'online' unless live packets arrived in last 15 seconds
-  const isOnline = settings.mode === 'live' && (Date.now() - lastHardwarePacketTime < 15000);
-  res.json({
-    ...latest,
-    deviceStatus: isOnline ? 'online' : 'offline',
-    settings,
-    serverTime: new Date().toISOString()
-  });
-});
+async function startServer() {
+  const app = express();
+  app.use(cors());
+  app.use(express.json({ limit: '1mb' }));
 
-// 2. Telemetry History (with range filtering)
-app.get('/api/telemetry/history', (req, res) => {
-  const range = (req.query.range as string) || '15m';
-  const now = Date.now();
-  let timeWindowMs = 15 * 60 * 1000; // 15 min default
-
-  if (range === '1h') timeWindowMs = 60 * 60 * 1000;
-  else if (range === '24h') timeWindowMs = 24 * 60 * 60 * 1000;
-  else if (range === '7d') timeWindowMs = 7 * 24 * 60 * 60 * 1000;
-
-  const filtered = telemetryHistory.filter(pt => {
-    const ptTime = new Date(pt.timestamp).getTime();
-    return now - ptTime <= timeWindowMs;
+  app.get('/api/health', (_req, res) => {
+    res.json({ ok: true, mode: settings.mode, sensors: ['ADXL345', 'MAX9814'] });
   });
 
-  res.json({
-    range,
-    count: filtered.length,
-    points: filtered.length > 0 ? filtered : telemetryHistory.slice(-20)
+  app.get('/api/telemetry/latest', (req, res) => {
+    const machineId = String(req.query.machineId || settings.machineId || 'machine_01');
+    const list = historyByMachine[machineId] || historyByMachine.machine_01;
+    const online = isHardwareOnline(machineId);
+
+    if (settings.mode === 'live') {
+      const latestHardware = [...list].reverse().find((p) => p.mode === 'live');
+      if (latestHardware) {
+        return res.json({
+          ...latestHardware,
+          deviceStatus: online ? 'online' : 'offline',
+        });
+      }
+      // Return honest empty/offline live telemetry state when awaiting first ESP32 packet
+      const evalRes = evaluateMachineHealth(0, 0, settings);
+      return res.json({
+        id: `live_awaiting_${machineId}`,
+        machineId,
+        machineName: MACHINE_CATALOG[machineId]?.split(' — ')[0] || 'Machine 01',
+        timestamp: '',
+        mode: 'live',
+        deviceStatus: 'offline',
+        vibration: {
+          x: 0,
+          y: 0,
+          z: 0,
+          resultant: 0,
+          rms: 0,
+          peak: 0,
+          dominantFrequency: null,
+          dominantFreqSource: 'unavailable',
+          status: 'normal',
+        },
+        noise: {
+          relativeLevel: 0,
+          peakLevel: 0,
+          patternState: 'normal',
+          trend: 'Awaiting packet',
+          status: 'normal',
+        },
+        health: {
+          ...evalRes.health,
+          detectedConditions: ['Awaiting valid ESP32 ADXL345 + MAX9814 HTTP telemetry packet'],
+          recommendation: 'Ensure ESP32 is connected to Wi-Fi and POSTing to /api/telemetry.',
+        },
+      } satisfies TelemetryPoint);
+    }
+
+    const latest = list[list.length - 1] || generateDemoPoint(machineId);
+    res.json({
+      ...latest,
+      mode: 'demo',
+      deviceStatus: online ? 'online' : 'offline',
+    });
   });
-});
 
-// 3. Settings Get & Update
-app.get('/api/settings', (_req, res) => {
-  res.json(settings);
-});
+  app.get('/api/telemetry/history', (req, res) => {
+    const machineId = String(req.query.machineId || settings.machineId || 'machine_01');
+    const range = String(req.query.range || '15m');
+    const list = historyByMachine[machineId] || historyByMachine.machine_01;
 
-app.post('/api/settings', (req, res) => {
-  const body = req.body;
-  settings = {
-    ...settings,
-    ...body,
-    // ensure numeric types
-    tempWarningThreshold: Number(body.tempWarningThreshold ?? settings.tempWarningThreshold),
-    tempCriticalThreshold: Number(body.tempCriticalThreshold ?? settings.tempCriticalThreshold),
-    vibrationBaseline: Number(body.vibrationBaseline ?? settings.vibrationBaseline),
-    vibrationWarningThreshold: Number(body.vibrationWarningThreshold ?? settings.vibrationWarningThreshold),
-    vibrationCriticalThreshold: Number(body.vibrationCriticalThreshold ?? settings.vibrationCriticalThreshold),
-    noiseWarningThreshold: Number(body.noiseWarningThreshold ?? settings.noiseWarningThreshold),
-    noiseCriticalThreshold: Number(body.noiseCriticalThreshold ?? settings.noiseCriticalThreshold),
-  };
+    const filtered =
+      settings.mode === 'live' ? list.filter((p) => p.mode === 'live') : list;
 
-  res.json({ success: true, settings });
-});
+    const sliceCount =
+      range === '15m' ? 40 : range === '1h' ? 80 : range === '24h' ? 160 : 240;
+    res.json(filtered.slice(-sliceCount));
+  });
 
-// 4. Alerts API
-app.get('/api/alerts', (_req, res) => {
-  res.json(alerts);
-});
+  // Real ESP32 HTTP POST endpoint for ADXL345 + MAX9814
+  app.post('/api/telemetry', (req, res) => {
+    const body = req.body || {};
+    const machineId = String(body.machineId || settings.machineId || 'machine_01');
+    const x = Number(body.x ?? 0);
+    const y = Number(body.y ?? 0);
+    const z = Number(body.z ?? 0);
+    const noiseLevel = Math.max(0, Math.min(100, Number(body.noiseLevel ?? body.noise ?? 0)));
 
-app.post('/api/alerts/acknowledge', (req, res) => {
-  const { alertId } = req.body;
-  alerts = alerts.map(a => a.id === alertId ? { ...a, acknowledged: true } : a);
-  res.json({ success: true });
-});
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z) || !Number.isFinite(noiseLevel)) {
+      return res.status(400).json({ error: 'Invalid ADXL345 or MAX9814 numeric payload.' });
+    }
 
-app.post('/api/alerts/clear', (_req, res) => {
-  alerts = alerts.filter(a => !a.acknowledged);
-  res.json({ success: true, remaining: alerts.length });
-});
+    const resultant = Number(
+      (body.resultant !== undefined ? Number(body.resultant) : Math.sqrt(x * x + y * y + z * z)).toFixed(2)
+    );
+    const rms = Number((body.rms !== undefined ? Number(body.rms) : resultant * 0.72).toFixed(2));
+    const peak = Number((body.peak !== undefined ? Number(body.peak) : resultant * 1.35).toFixed(2));
+    const domFreq =
+      body.dominantFrequency !== undefined && Number.isFinite(Number(body.dominantFrequency))
+        ? Number(body.dominantFrequency)
+        : null;
 
-// 5. Ingestion Endpoint for ESP32 Hardware
-app.post('/api/telemetry', (req, res) => {
-  try {
-    const {
-      machine_id,
-      vibration_x,
-      vibration_y,
-      vibration_z,
-      vibration_rms,
-      temperature,
-      noise_relative,
-      hardware_status
-    } = req.body;
+    const patternState: NoisePatternState =
+      noiseLevel >= settings.noiseAnomalyThreshold
+        ? 'spike_detected'
+        : noiseLevel >= settings.noiseWarningThreshold
+          ? 'high_noise'
+          : 'normal';
 
-    lastHardwarePacketTime = Date.now();
-
-    const timestamp = new Date().toISOString();
-    const x = Number(vibration_x ?? 0);
-    const y = Number(vibration_y ?? 0);
-    const z = Number(vibration_z ?? 9.81);
-    const dynamicAcc = Math.sqrt(x * x + y * y + Math.pow(z - 9.81, 2));
-    const resultant = Number(dynamicAcc.toFixed(2));
-    const rms = Number((vibration_rms ?? dynamicAcc * 0.707).toFixed(2));
-    const peak = Number((dynamicAcc * 1.414).toFixed(2));
-    const temp = Number(temperature ?? 25.0);
-    const noise = Number(noise_relative ?? 30.0);
-
-    let vibStatus: HealthStatus = 'normal';
-    if (rms >= settings.vibrationCriticalThreshold) vibStatus = 'anomaly';
-    else if (rms >= settings.vibrationWarningThreshold) vibStatus = 'warning';
-
-    let tempStatus: HealthStatus = 'normal';
-    if (temp >= settings.tempCriticalThreshold) tempStatus = 'anomaly';
-    else if (temp >= settings.tempWarningThreshold) tempStatus = 'warning';
-
-    let noiseStatus: HealthStatus = 'normal';
-    if (noise >= settings.noiseCriticalThreshold) noiseStatus = 'anomaly';
-    else if (noise >= settings.noiseWarningThreshold) noiseStatus = 'warning';
-
-    const health = evaluateHealth(rms, temp, noise, settings);
+    const evalRes = evaluateMachineHealth(resultant, noiseLevel, settings);
+    const nowMs = Date.now();
+    lastHardwarePacketByMachine[machineId] = nowMs;
 
     const point: TelemetryPoint = {
-      id: `hw-${Date.now()}`,
-      timestamp,
-      machineId: machine_id || settings.machineId,
-      machineName: settings.machineName,
+      id: `esp32_${machineId}_${nowMs}`,
+      machineId,
+      machineName: MACHINE_CATALOG[machineId]?.split(' — ')[0] || 'Machine 01',
+      timestamp: new Date(nowMs).toISOString(),
+      mode: 'live',
+      deviceStatus: 'online',
       vibration: {
-        x,
-        y,
-        z,
+        x: Number(x.toFixed(3)),
+        y: Number(y.toFixed(3)),
+        z: Number(z.toFixed(3)),
         resultant,
         rms,
         peak,
-        dominantFrequency: req.body.dominant_frequency ? Number(req.body.dominant_frequency) : null,
-        dominantFreqSource: req.body.dominant_frequency ? 'calculated' : 'unavailable',
-        baseline: settings.vibrationBaseline,
-        deviationPercent: Number((((rms - settings.vibrationBaseline) / settings.vibrationBaseline) * 100).toFixed(1)),
-        status: vibStatus
-      },
-      temperature: {
-        current: temp,
-        min: temp,
-        max: temp,
-        warningThreshold: settings.tempWarningThreshold,
-        criticalThreshold: settings.tempCriticalThreshold,
-        status: tempStatus
+        dominantFrequency: domFreq,
+        dominantFreqSource: domFreq !== null ? 'demo' : 'unavailable',
+        status: evalRes.vibStatus,
       },
       noise: {
-        relativeLevel: noise,
-        peakLevel: Number((noise * 1.1).toFixed(1)),
-        variance: 1.0,
-        patternState: 'steady',
-        trend: 'Stable',
-        status: noiseStatus,
-        calibrationNote: 'ESP32 ADC raw envelope sampling. Uncalibrated relative noise level.'
+        relativeLevel: Math.round(noiseLevel),
+        peakLevel: Math.min(100, Math.round(Number(body.noisePeak ?? noiseLevel + 6))),
+        patternState,
+        trend: evalRes.noiseStatus === 'anomaly' ? 'Spiking' : 'Live',
+        status: evalRes.noiseStatus,
       },
-      health,
-      deviceStatus: 'online',
-      hardware: {
-        adxl345Connected: hardware_status?.adxl345 ?? true,
-        ds18b20Connected: hardware_status?.ds18b20 ?? true,
-        max9814Connected: hardware_status?.max9814 ?? true
-      },
-      source: 'esp32_hardware'
+      health: evalRes.health,
     };
 
-    telemetryHistory.push(point);
-    if (telemetryHistory.length > 500) telemetryHistory.shift();
+    if (!historyByMachine[machineId]) historyByMachine[machineId] = [];
+    historyByMachine[machineId].push(point);
+    if (historyByMachine[machineId].length > 300) historyByMachine[machineId].shift();
+    recordAlertsIfNeeded(point);
 
-    res.status(201).json({ success: true, pointId: point.id, healthStatus: health.status });
-  } catch (err: any) {
-    res.status(400).json({ error: 'Malformed telemetry packet', message: err.message });
-  }
-});
-
-// 6. AI Machine Health Diagnostic (Rule-based + optional Gemini analysis)
-app.post('/api/ai/diagnose', async (req, res) => {
-  const latest = telemetryHistory[telemetryHistory.length - 1] || createSyntheticDataPoint();
-  const apiKey = process.env.GEMINI_API_KEY;
-
-  const baselineRuleAnalysis = {
-    vibrationAnalysis: `ADXL345 recorded resultant vibration is ${latest.vibration.resultant} m/s² with RMS of ${latest.vibration.rms} m/s² (baseline: ${latest.vibration.baseline} m/s², deviation: ${latest.vibration.deviationPercent}%). Based on configured machine threshold rules, vibration status sits in ${latest.vibration.status.toUpperCase()} band.`,
-    temperatureAnalysis: `DS18B20 digital temperature probe indicates ${latest.temperature.current}°C (warning threshold: ${latest.temperature.warningThreshold}°C, critical: ${latest.temperature.criticalThreshold}°C). Thermal status is ${latest.temperature.status.toUpperCase()}.`,
-    acousticAnalysis: `MAX9814 relative acoustic amplitude index is ${latest.noise.relativeLevel}% (peak: ${latest.noise.peakLevel}%). Pattern classified as ${latest.noise.patternState}. Note: Uncalibrated relative microphone signal.`,
-    holisticConditionScore: latest.health.score,
-    overallAssessment: latest.health.reasons.join(' '),
-    cautiousRecommendations: latest.health.recommendations,
-    disclaimer: 'Notice: This AI diagnostic evaluation is advisory. Sensor telemetry alone cannot establish conclusive mechanical diagnosis. Certified personnel physical inspection is required before taking equipment offline or performing teardown.'
-  };
-
-  // If Gemini API Key is configured, enrich with Gemini 2.5 Flash
-  if (apiKey) {
-    try {
-      const ai = new GoogleGenAI({ apiKey });
-      const prompt = `You are an industrial mechanical reliability engineer analyzing an automated condition-monitoring system called SmartVibe.
-Machine: ${latest.machineName} (${settings.machineType})
-Sensors:
-1. ADXL345 Vibration: Resultant=${latest.vibration.resultant} m/s², RMS=${latest.vibration.rms} m/s², Peak=${latest.vibration.peak} m/s², Baseline=${latest.vibration.baseline} m/s²
-2. DS18B20 Temperature: Current=${latest.temperature.current}°C, Warning=${latest.temperature.warningThreshold}°C, Critical=${latest.temperature.criticalThreshold}°C
-3. MAX9814 Noise: Relative Amplitude Envelope=${latest.noise.relativeLevel}% (uncalibrated ADC index, not dB SPL), Pattern=${latest.noise.patternState}
-Current Health Score: ${latest.health.score}/100 (Status: ${latest.health.status})
-
-Provide a structured, cautious technical assessment:
-- Multi-parameter correlation analysis
-- Potential mechanical explanations to verify (e.g. bearing lubrication, shaft misalignment, belt tension, or sensor mounting looseness)
-- Step-by-step cautious recommendations (strictly adhering to: do NOT claim a confirmed mechanical fault from sensor readings alone).
-Keep your tone rigorous, professional, and practical for an engineering lab test bay.`;
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt
-      });
-
-      return res.json({
-        ...baselineRuleAnalysis,
-        geminiEnriched: true,
-        detailedAiReport: response.text
-      });
-    } catch (err: any) {
-      console.warn('Gemini API call failed, falling back to rule-based engine:', err?.message);
-    }
-  }
-
-  res.json({
-    ...baselineRuleAnalysis,
-    geminiEnriched: false,
-    detailedAiReport: null
+    res.status(201).json(point);
   });
-});
 
-// Setup Vite or static serving
-async function startServer() {
-  if (process.env.NODE_ENV === 'production') {
-    app.use(express.static(path.join(__dirname, 'dist')));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+  app.get('/api/alerts', (_req, res) => {
+    res.json(alerts);
+  });
+
+  app.post('/api/alerts/acknowledge', (req, res) => {
+    const id = String(req.body?.id || '');
+    const target = alerts.find((a) => a.id === id);
+    if (target) target.acknowledged = true;
+    res.json({ ok: true });
+  });
+
+  app.post('/api/alerts/clear', (_req, res) => {
+    alerts.length = 0;
+    res.json({ ok: true });
+  });
+
+  app.get('/api/settings', (_req, res) => {
+    res.json(settings);
+  });
+
+  app.post('/api/settings', (req, res) => {
+    const patch = req.body || {};
+    settings = {
+      ...settings,
+      ...patch,
+      vibWarningThreshold: Number(patch.vibWarningThreshold ?? settings.vibWarningThreshold),
+      vibAnomalyThreshold: Number(patch.vibAnomalyThreshold ?? settings.vibAnomalyThreshold),
+      noiseWarningThreshold: Number(patch.noiseWarningThreshold ?? settings.noiseWarningThreshold),
+      noiseAnomalyThreshold: Number(patch.noiseAnomalyThreshold ?? settings.noiseAnomalyThreshold),
+      esp32TimeoutSeconds: Number(patch.esp32TimeoutSeconds ?? settings.esp32TimeoutSeconds),
+    };
+    res.json(settings);
+  });
+
+  app.post('/api/ai/diagnose', async (req, res) => {
+    const machineId = String(req.body?.machineId || settings.machineId || 'machine_01');
+    const list = historyByMachine[machineId] || historyByMachine.machine_01;
+    const recent = list.slice(-10);
+    const latest = recent[recent.length - 1] || generateDemoPoint(machineId);
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (apiKey && apiKey !== 'MY_GEMINI_API_KEY') {
+      try {
+        const ai = new GoogleGenAI({
+          apiKey,
+          httpOptions: {
+            headers: {
+              'User-Agent': 'aistudio-build',
+            },
+          },
+        });
+
+        const prompt = `Analyze the following real-time industrial machine telemetry from a 2-sensor ESP32 node (ADXL345 Tri-Axis Accelerometer + MAX9814 Electret Microphone ONLY — there is NO temperature sensor).
+Machine: ${latest.machineName}
+Operation Mode: ${settings.mode.toUpperCase()}
+Deterministic Health Score: ${latest.health.score}/100 (${latest.health.status.toUpperCase()})
+ADXL345 Vibration: X=${latest.vibration.x} m/s², Y=${latest.vibration.y} m/s², Z=${latest.vibration.z} m/s², Resultant=${latest.vibration.resultant} m/s², RMS=${latest.vibration.rms} m/s², Peak=${latest.vibration.peak} m/s² (Warning >= ${settings.vibWarningThreshold}, Anomaly >= ${settings.vibAnomalyThreshold})
+MAX9814 Relative Sound Index: ${latest.noise.relativeLevel}% (Peak ${latest.noise.peakLevel}%, Pattern: ${latest.noise.patternState}, Warning >= ${settings.noiseWarningThreshold}%, Anomaly >= ${settings.noiseAnomalyThreshold}%)
+Detected Conditions: ${latest.health.detectedConditions.join('; ')}
+
+Provide a concise, engineering-grade diagnostic assessment in 4 short bullet points covering mechanical balance/bearing vibration, acoustic signature, fault likelihood, and recommended physical inspection steps. Do NOT mention or assume temperature or thermal sensors.`;
+
+        const response = await ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: prompt,
+        });
+
+        const text = response.text?.trim();
+        if (text) {
+          return res.json({
+            evaluation: latest.health,
+            detailedReport: text,
+            generatedBy: 'gemini',
+            timestamp: new Date().toISOString(),
+          });
+        }
+      } catch (err) {
+        console.warn('Gemini diagnostic fallback triggered:', err instanceof Error ? err.message : err);
+      }
+    }
+
+    const fallbackReport =
+      `SmartVibe Deterministic Diagnostic Summary (${latest.machineName}):\n` +
+      `• ADXL345 Vibration Profile: Resultant ${latest.vibration.resultant} m/s² (X: ${latest.vibration.x}, Y: ${latest.vibration.y}, Z: ${latest.vibration.z} m/s²), RMS ${latest.vibration.rms} m/s², Peak ${latest.vibration.peak} m/s².\n` +
+      `• MAX9814 Acoustic Signature: Relative noise level ${latest.noise.relativeLevel}% (Peak ${latest.noise.peakLevel}%, pattern classified as ${latest.noise.patternState.replace('_', ' ')}).\n` +
+      `• Penalty Breakdown: Vibration Penalty -${latest.health.vibrationPenalty} pts | Acoustic Penalty -${latest.health.acousticPenalty} pts -> Score ${latest.health.score}/100 (${latest.health.status.toUpperCase()}).\n` +
+      `• Maintenance Action: ${latest.health.recommendation}`;
+
+    res.json({
+      evaluation: latest.health,
+      detailedReport: fallbackReport,
+      generatedBy: 'rule-engine',
+      timestamp: new Date().toISOString(),
     });
-  } else {
+  });
+
+  if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: 'spa'
+      appType: 'spa',
     });
     app.use(vite.middlewares);
+  } else {
+    const distPath = path.resolve(__dirname, 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`SmartVibe IoT Server running on http://0.0.0.0:${PORT}`);
+    console.log(`SmartVibe server listening on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Failed to start SmartVibe server:', err);
+  process.exit(1);
+});
